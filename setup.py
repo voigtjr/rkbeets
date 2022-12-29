@@ -32,6 +32,8 @@ from setuptools import setup
 setup(
     name='rkbeets',
     version='0.1.0',
+    include_package_data=True,
+    packages=['beetsplug.rkbeets'],
     install_requires=[
         'beets>=1.6.0',
         'pandas',
