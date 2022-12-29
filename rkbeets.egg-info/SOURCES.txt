@@ -1,0 +1,13 @@
+.gitignore
+LICENSE
+README.md
+setup.py
+beetsplug/__init__.py
+beetsplug/rkbeets/__init__.py
+beetsplug/rkbeets/command.py
+beetsplug/rkbeets/core.py
+rkbeets.egg-info/PKG-INFO
+rkbeets.egg-info/SOURCES.txt
+rkbeets.egg-info/dependency_links.txt
+rkbeets.egg-info/requires.txt
+rkbeets.egg-info/top_level.txt

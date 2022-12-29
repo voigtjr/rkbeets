@@ -35,5 +35,6 @@ setup(
     install_requires=[
         'beets>=1.6.0',
         'pandas',
+        'pyrekordbox @ git+https://github.com/voigtjr/pyrekordbox@master',
     ],
 )
