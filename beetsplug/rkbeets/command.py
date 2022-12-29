@@ -25,12 +25,23 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from dataclasses import dataclass
+from datetime import datetime
+import os
+
 from beets.dbcore import types
 from beets.library import Library
-from beets.ui import Subcommand, SubcommandsOptionParser
+from beets.ui import Subcommand, SubcommandsOptionParser, UserError
 from confuse import Subview
 
 from beetsplug.rkbeets import core
+
+
+@dataclass
+class RkbeetsConfig:
+    """Resolved configuration settings for operation of this plugin."""
+    xml_filename: str
+    xml_outfile: str
 
 
 class HelpSubcommand(Subcommand):
@@ -45,7 +56,7 @@ class HelpSubcommand(Subcommand):
 
 
 class ReportSubcommand(Subcommand):
-    parser: SubcommandsOptionParser = None
+    parser: SubcommandsOptionParser
 
     def __init__(self):
         self.parser = SubcommandsOptionParser(
@@ -58,9 +69,12 @@ class ReportSubcommand(Subcommand):
             help='Show information about the Rekordbox and beets libraries'
         )
     
-    def func(self, xml_filename, lib: Library, opts, args):
-        print("Loading Rekordbox XML {}...".format(repr(xml_filename)))
-        df_rbxml = core.load_rbxml_df(xml_filename)
+    def func(self, rkbcfg, lib: Library, opts, args):
+        if not os.path.exists(rkbcfg.xml_filename):
+            raise UserError('rekordbox xml is required')
+
+        print("Loading Rekordbox XML {}...".format(rkbcfg.xml_filename))
+        df_rbxml = core.load_rbxml_df(rkbcfg.xml_filename)
 
         print("Loading beets library...")
         df_beets = core.load_beets_df(lib)
@@ -69,7 +83,8 @@ class ReportSubcommand(Subcommand):
             df_rbxml=df_rbxml, df_beets=df_beets
         )
 
-        print("Rekordbox has {} tracks in the beets music directory".format(df_rbxml.index.size))
+        print("Rekordbox has {} tracks in the beets music directory".format(
+            df_rbxml.index.size))
         print("Beets has {} tracks".format(df_beets.index.size))
         print("They share {} tracks".format(df_rbxml_beets.index.size))
 
@@ -79,7 +94,7 @@ class ReportSubcommand(Subcommand):
                 print("    ", path)
 
         if not only_beets.empty:
-            print("Only in Rekordbox:")
+            print("Only in beets:")
             for path in only_beets:
                 print("    ", path)
 
@@ -91,9 +106,12 @@ class SyncSubcommand(Subcommand):
             help='sync metadata from rekordbox xml to beets database. Rating is the only implemented field so far.'
         )
     
-    def func(self, xml_filename, lib: Library, opts, args):
-        print("Loading Rekordbox XML {}...".format(repr(xml_filename)))
-        df_rbxml = core.load_rbxml_df(xml_filename)
+    def func(self, rkbcfg, lib: Library, opts, args):
+        if not os.path.exists(rkbcfg.xml_filename):
+            raise UserError('rekordbox xml is required')
+
+        print("Loading Rekordbox XML {}...".format(rkbcfg.xml_filename))
+        df_rbxml = core.load_rbxml_df(rkbcfg.xml_filename)
 
         print("Loading beets library...")
         df_beets = core.load_beets_df(lib)
@@ -105,7 +123,9 @@ class SyncSubcommand(Subcommand):
         # Copy the rating column over
         df_beets_rbxml['new_rating'] = df_rbxml_beets['Rating']
 
-        df_changed_ratings = df_beets_rbxml[df_beets_rbxml['rating'] != df_beets_rbxml['new_rating']].set_index('id')
+        df_changed_ratings = df_beets_rbxml[
+            df_beets_rbxml['rating'] != df_beets_rbxml['new_rating']
+            ].set_index('id')
 
         if df_changed_ratings.empty:
             print("Nothing to update.")
@@ -113,9 +133,11 @@ class SyncSubcommand(Subcommand):
 
         for id, new_rating in df_changed_ratings['new_rating'].items():
             item = lib.get_item(id)
-            print("Updating rating from {} to {} on {}".format(item.rating, new_rating, item))
+            print("Updating rating from {} to {} on {}".format(
+                item.rating, new_rating, item))
             item.update({'rating': new_rating})
-            item.try_sync(False, False)
+            # TODO untested
+            item.store(['rating'])
 
 
 class MakeImportSubcommand(Subcommand):
@@ -125,12 +147,46 @@ class MakeImportSubcommand(Subcommand):
             help='make-import TODO'
         )
     
-    def func(self, *_):
-        print(self.root_parser.format_help())
+    def func(self, rkbcfg, lib: Library, opts, args):
+        if rkbcfg.xml_outfile is None or not os.path.exists(rkbcfg.xml_filename):
+            raise UserError('rekordbox xml is required')
+
+        if rkbcfg.xml_outfile is None:
+            raise UserError('xml output file is required for this command')
+
+        outxml = core.new_outxml()
+
+        print("Loading Rekordbox XML {}...".format(rkbcfg.xml_filename))
+        df_rbxml = core.load_rbxml_df(rkbcfg.xml_filename)
+
+        print("Loading beets library...")
+        df_beets = core.load_beets_df(lib)
+
+        _, df_rbxml_beets, only_rbxml, only_beets = core.crop(
+            df_rbxml=df_rbxml, df_beets=df_beets
+        )
+
+        df_beets.set_index('path', inplace=True)
+        for path, row in df_beets.loc[only_beets].iterrows():
+            # TODO figure out why the int boxing is required
+            item = lib.get_item(int(row.id))
+
+            # Strip leading slash because rekordbox doesn't like it
+            track = outxml.add_track(location=path[1:])
+
+            for rb_field, beets_getter in core.FIELDS_TO_RB.items():
+                value = beets_getter(item)
+                if value is not None:
+                    track[rb_field] = value
+            
+        print("Saving to {}".format(rkbcfg.xml_outfile))
+        outxml.save(path=rkbcfg.xml_outfile)
 
 
 class RkbeetsCommand(Subcommand):
     item_types = {'rating': types.INTEGER}
+    XML_FILENAME = 'xml_filename'
+    XML_OUTFILE = 'xml_outfile'
 
     @property
     def album_types(self):
@@ -142,15 +198,21 @@ class RkbeetsCommand(Subcommand):
 
     def __init__(self, cfg):
         self.config = cfg
+        self.config.add({
+            self.XML_FILENAME: None,
+            self.XML_OUTFILE: None,
+        })
 
         self.parser = SubcommandsOptionParser(
-            usage='beet {name} TODO'.format(name=self.command_name)
-        )
+            usage='beet {name} TODO'.format(name=self.command_name))
 
         self.parser.add_option(
-            '-x', '--xml-file', dest='xml_filename',
-            help=u'Rekordbox XML filename to use'
-        )
+            '-x', '--xml-file', dest=self.XML_FILENAME,
+            help=u'Rekordbox xml filename to use')
+
+        self.parser.add_option(
+            '-o', '--xml-outfile', dest=self.XML_OUTFILE,
+            help=u'Output file for xml-generating commands')
 
         self.parser.add_subcommand(HelpSubcommand())
         self.parser.add_subcommand(ReportSubcommand())
@@ -160,22 +222,15 @@ class RkbeetsCommand(Subcommand):
         super(RkbeetsCommand, self).__init__(
             name=self.command_name,
             parser=self.parser,
-            help='Rekordbox integration utilities',
-        )
+            help='Rekordbox integration utilities')
 
     def func(self, lib: Library, opts, args):
-        xml_filename = self.resolve_xml_filename(opts.xml_filename)
-        if xml_filename is None:
-            print("Rekordbox XML file is required, specify in plugin configuration or with the -x command line argument.")
-            self.parser.print_help()
-            return
+        rkbcfg = RkbeetsConfig(
+            xml_filename=self.resolve(opts.xml_filename, self.XML_FILENAME),
+            xml_outfile=self.resolve(opts.xml_outfile, self.XML_OUTFILE))
 
         subcommand, suboptions, subargs = self.parser.parse_subcommand(args)
-        subcommand.func(xml_filename, lib, suboptions, subargs)
+        subcommand.func(rkbcfg, lib, suboptions, subargs)
 
-    def resolve_xml_filename(self, opt_xml_filename):
-        xml_filename = opt_xml_filename
-        if xml_filename is None:
-            if self.config['xml_filename'].exists():
-                xml_filename = self.config['xml_filename'].get()
-        return xml_filename
+    def resolve(self, opt, key):
+        return opt if opt else self.config[key].get()

@@ -41,6 +41,39 @@ finally:
     logging.disable(previous_level)
 
 
+def _get_samplerate(i):
+    value = i.get('samplerate')
+    return None if value is None else value / 1000
+
+FIELDS_TO_RB = {
+    'Name':         lambda i: i.get('title'),
+    'Artist':       lambda i: i.get('artist'),
+    'Composer':     lambda i: i.get('composer'),
+    'Album':        lambda i: i.get('album'),
+    'Grouping':     lambda i: i.get('grouping'),
+    'Genre':        lambda i: i.get('genre'),
+    'Kind':         lambda i: i.get('format'),
+    'Size':         lambda i: i.get('filesize'), # Item getter calls try_filesize()
+    'TotalTime':    lambda i: i.get('length'),
+    'DiscNumber':   lambda i: i.get('disc'),
+    'TrackNumber':  lambda i: i.get('track'),
+    'Year':         lambda i: i.get('year'),
+    'BitRate':      lambda i: i.get('bitrate'),
+    'SampleRate':   _get_samplerate, # Beets is in kHz, RB in Hz
+    'Comments':     lambda i: i.get('comments'),
+    'Rating':       lambda i: i.get('rating'),
+    'Remixer':      lambda i: i.get('remixer'),
+    'Label':        lambda i: i.get('label'),
+    # 'Location':     lambda i: i.get('path'), # Set in ctor
+    # 'AverageBpm':   None,
+    # 'DateModified': None,
+    # 'DateAdded':    None,
+    # 'Tonality':     None,
+    # 'Mix':          None,           # TODO: capture?
+    # 'Colour':       None,           # TODO: capture?
+}
+
+
 def load_beets_df(lib: Library):
     d = defaultdict(list)
 
@@ -49,14 +82,12 @@ def load_beets_df(lib: Library):
         d['rating'].append(item.get('rating', default=-1))
         d['path'].append(item.path.decode('utf-8'))
 
-    df = pandas.DataFrame(data=d)
-    df['path'] = df['path'].str.normalize('NFD').str.lower()
-    return df
+    return pandas.DataFrame(data=d)
 
 
 def load_rbxml_df(xml_filename):
-    '''Filtered using the beets music directory, anything outside of that is not
-    considered.'''
+    """Filtered using the beets music directory, anything outside of that is not
+    considered."""
     music_directory = global_config['directory'].get()
 
     xml = RekordboxXml(xml_filename)
@@ -66,24 +97,35 @@ def load_rbxml_df(xml_filename):
             for attr in t.ATTRIBS:
                 d[attr].append(t[attr])
     df = pandas.DataFrame(data=d)
-    df['Location'] = ('/' + df['Location']).str.normalize('NFD').str.lower()
+    df['Location'] = '/' + df['Location']
     return df
 
 
+def normalize_lower_paths(series):
+    return series.str.normalize('NFD').str.lower()
+
+
 def crop(df_rbxml, df_beets):
-    df_rbxml = df_rbxml.set_index('Location')
-    df_beets = df_beets.set_index('path')
+    df_rbxml_index = normalize_lower_paths(df_rbxml['Location'])
+    df_rbxml = df_rbxml.set_index(df_rbxml_index)
+
+    df_beets_index = normalize_lower_paths(df_beets['path'])
+    df_beets = df_beets.set_index(df_beets_index)
 
     # Crop both down to paths intersection
     df_rbxml_beets = df_rbxml.loc[df_rbxml.index.intersection(df_beets.index)]
     df_beets_rbxml = df_beets.loc[df_beets.index.intersection(df_rbxml_beets.index)]
 
     # Save the differences
-    only_rbxml = df_rbxml.loc[df_rbxml.index.difference(df_beets.index)].index
-    only_beets = df_beets.loc[df_beets.index.difference(df_rbxml_beets.index)].index
+    only_rbxml = df_rbxml.loc[df_rbxml.index.difference(df_beets.index)]['Location']
+    only_beets = df_beets.loc[df_beets.index.difference(df_rbxml_beets.index)]['path']
 
     # They are the same shape, now make the indexes match
     df_rbxml_beets.sort_index(inplace=True)
     df_beets_rbxml.sort_index(inplace=True)
 
     return df_beets_rbxml, df_rbxml_beets, only_rbxml, only_beets
+
+
+def new_outxml():
+    return RekordboxXml(name='rekordbox', version='5.4.3', company='Pioneer DJ')
