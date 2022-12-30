@@ -26,7 +26,9 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from collections import defaultdict
+from dataclasses import dataclass
 import logging
+from pathlib import Path
 
 from beets import config
 from beets import plugins
@@ -44,10 +46,89 @@ finally:
     logging.disable(previous_level)
 
 
+@dataclass
+class LibraryDataframes:
+    df_rbxml: pandas.DataFrame
+    df_beets: pandas.DataFrame = None
+
 def get_samplerate(i):
     value = i.get('samplerate')
     return None if value is None else value / 1000
 
+FIELDS_TO_RB = {
+    'Name':         lambda i: i.get('title'),
+    'Artist':       lambda i: i.get('artist'),
+    'Composer':     lambda i: i.get('composer'),
+    'Album':        lambda i: i.get('album'),
+    'Grouping':     lambda i: i.get('grouping'),
+    'Genre':        lambda i: i.get('genre'),
+    'Kind':         lambda i: i.get('format'),
+    'Size':         lambda i: i.get('filesize'), # Item getter calls try_filesize()
+    'TotalTime':    lambda i: i.get('length'),
+    'DiscNumber':   lambda i: i.get('disc'),
+    'TrackNumber':  lambda i: i.get('track'),
+    'Year':         lambda i: i.get('year'),
+    'BitRate':      lambda i: i.get('bitrate'),
+    'SampleRate':   get_samplerate, # Beets is in kHz, RB in Hz
+    'Comments':     lambda i: i.get('comments'),
+    'Rating':       lambda i: i.get('rating'),
+    'Remixer':      lambda i: i.get('remixer'),
+    'Label':        lambda i: i.get('label'),
+    # 'Location':     lambda i: i.get('path'), # Set in ctor
+    # 'AverageBpm':   None,
+    # 'DateModified': None,
+    # 'DateAdded':    None,
+    # 'Tonality':     None,
+    # 'Mix':          None,           # TODO: capture?
+    # 'Colour':       None,           # TODO: capture?
+}
+
+def crop(df_rbxml, df_beets):
+    # TODO report on normalization errors? definitely on inconsistent spaces
+    df_rbxml_index = df_rbxml['Location'].str.normalize('NFD').str.lower()
+    df_rbxml = df_rbxml.set_index(df_rbxml_index)
+
+    df_beets_index = df_beets['path'].str.normalize('NFD').str.lower()
+    df_beets = df_beets.set_index(df_beets_index)
+
+    # Crop both down to paths intersection
+    df_rbxml_beets = df_rbxml.loc[df_rbxml.index.intersection(df_beets.index)]
+    df_beets_rbxml = df_beets.loc[df_beets.index.intersection(df_rbxml_beets.index)]
+
+    # Save the differences
+    only_rbxml = df_rbxml.loc[df_rbxml.index.difference(df_beets.index)]['Location']
+    only_beets = df_beets.loc[df_beets.index.difference(df_rbxml_beets.index)]['path']
+
+    # They are the same shape, now make the indexes match
+    df_rbxml_beets.sort_index(inplace=True)
+    df_beets_rbxml.sort_index(inplace=True)
+
+    return df_beets_rbxml, df_rbxml_beets, only_rbxml, only_beets
+
+def load_rbxml_df(xml_path):
+    """Filtered using the beets music directory, anything outside of that is not
+    considered."""
+    music_directory = config['directory'].get()
+
+    xml = pxml.RekordboxXml(xml_path)
+    d = defaultdict(list)
+    for t in xml.get_tracks():
+        if t['Location'].lower().startswith(music_directory[1:].lower()):
+            for attr in t.ATTRIBS:
+                d[attr].append(t[attr])
+    df = pandas.DataFrame(data=d)
+    df['Location'] = '/' + df['Location']
+    return df
+
+def load_beets_df(lib):
+    d = defaultdict(list)
+
+    for item in lib.items():
+        d['id'].append(item['id'])
+        d['rating'].append(item.get('rating', default=-1))
+        d['path'].append(item.path.decode('utf-8'))
+
+    return pandas.DataFrame(data=d)
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
     # Flexible attribute typing
@@ -66,80 +147,35 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             'xml_outfile': None,
         })
 
-    def load_rbxml_df(self, xml_filename):
-        """Filtered using the beets music directory, anything outside of that is not
-        considered."""
-        music_directory = config['directory'].get()
+    def load_libraries(self, lib=None):
+        if not self.config['xml_filename']:
+            raise ui.UserError("xml_filename required")
 
-        xml = pxml.RekordboxXml(xml_filename)
-        d = defaultdict(list)
-        for t in xml.get_tracks():
-            if t['Location'].lower().startswith(music_directory[1:].lower()):
-                for attr in t.ATTRIBS:
-                    d[attr].append(t[attr])
-        df = pandas.DataFrame(data=d)
-        df['Location'] = '/' + df['Location']
-        return df
+        xml_path = Path(self.config['xml_filename'].get()).resolve()
+        if not xml_path.exists():
+            raise ui.UserError("xml_filename doesn't exist: {}".format(xml_path))
+        
+        if not xml_path.is_file():
+            raise ui.UserError("xml_filename not a file: {}".format(xml_path))
 
-    def load_beets_df(self, lib):
-        d = defaultdict(list)
+        print("loading '{}'...".format(xml_path))
+        df_rbxml = load_rbxml_df(xml_path)
 
-        for item in lib.items():
-            d['id'].append(item['id'])
-            d['rating'].append(item.get('rating', default=-1))
-            d['path'].append(item.path.decode('utf-8'))
+        if lib is not None:
+            print("loading beets library...")
+            df_beets = load_beets_df(lib)
+            return LibraryDataframes(df_rbxml, df_beets)
 
-        return pandas.DataFrame(data=d)
+        return LibraryDataframes(df_rbxml)
+    
+    def check_xml_outfile(self):
+        if not self.config['xml_outfile']:
+            raise ui.UserError('xml_outfile required')
 
-    def crop(self, df_rbxml, df_beets):
-        # TODO report on normalization errors? definitely on inconsistent spaces
-        df_rbxml_index = df_rbxml['Location'].str.normalize('NFD').str.lower()
-        df_rbxml = df_rbxml.set_index(df_rbxml_index)
-
-        df_beets_index = df_beets['path'].str.normalize('NFD').str.lower()
-        df_beets = df_beets.set_index(df_beets_index)
-
-        # Crop both down to paths intersection
-        df_rbxml_beets = df_rbxml.loc[df_rbxml.index.intersection(df_beets.index)]
-        df_beets_rbxml = df_beets.loc[df_beets.index.intersection(df_rbxml_beets.index)]
-
-        # Save the differences
-        only_rbxml = df_rbxml.loc[df_rbxml.index.difference(df_beets.index)]['Location']
-        only_beets = df_beets.loc[df_beets.index.difference(df_rbxml_beets.index)]['path']
-
-        # They are the same shape, now make the indexes match
-        df_rbxml_beets.sort_index(inplace=True)
-        df_beets_rbxml.sort_index(inplace=True)
-
-        return df_beets_rbxml, df_rbxml_beets, only_rbxml, only_beets
-
-    FIELDS_TO_RB = {
-        'Name':         lambda i: i.get('title'),
-        'Artist':       lambda i: i.get('artist'),
-        'Composer':     lambda i: i.get('composer'),
-        'Album':        lambda i: i.get('album'),
-        'Grouping':     lambda i: i.get('grouping'),
-        'Genre':        lambda i: i.get('genre'),
-        'Kind':         lambda i: i.get('format'),
-        'Size':         lambda i: i.get('filesize'), # Item getter calls try_filesize()
-        'TotalTime':    lambda i: i.get('length'),
-        'DiscNumber':   lambda i: i.get('disc'),
-        'TrackNumber':  lambda i: i.get('track'),
-        'Year':         lambda i: i.get('year'),
-        'BitRate':      lambda i: i.get('bitrate'),
-        'SampleRate':   get_samplerate, # Beets is in kHz, RB in Hz
-        'Comments':     lambda i: i.get('comments'),
-        'Rating':       lambda i: i.get('rating'),
-        'Remixer':      lambda i: i.get('remixer'),
-        'Label':        lambda i: i.get('label'),
-        # 'Location':     lambda i: i.get('path'), # Set in ctor
-        # 'AverageBpm':   None,
-        # 'DateModified': None,
-        # 'DateAdded':    None,
-        # 'Tonality':     None,
-        # 'Mix':          None,           # TODO: capture?
-        # 'Colour':       None,           # TODO: capture?
-    }
+        xml_path = Path(self.config['xml_outfile'].get()).resolve()
+        if xml_path.is_dir():
+            raise ui.UserError("xml_outdir is a directory: {}".format(xml_path))
+        return xml_path
 
     def commands(self):
         rkb_report_cmd = ui.Subcommand(
@@ -153,20 +189,16 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         def rkb_report_func(lib, opts, args):
             self.config.set_args(opts)
 
-            print("loading '{}'...".format(self.config['xml_filename'].get()))
-            df_rbxml = self.load_rbxml_df(self.config['xml_filename'].get())
+            dfs = self.load_libraries(lib)
 
-            print("loading beets library...")
-            df_beets = self.load_beets_df(lib)
-
-            _, df_rbxml_beets, only_rbxml, only_beets = self.crop(
-                df_rbxml=df_rbxml, df_beets=df_beets
+            _, df_rbxml_beets, only_rbxml, only_beets = crop(
+                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
             )
 
-            print("Rekordbox has {} tracks in the beets music directory".format(
-                df_rbxml.index.size))
-            print("Beets has {} tracks".format(df_beets.index.size))
-            print("They share {} tracks".format(df_rbxml_beets.index.size))
+            print("{:>6d} tracks in rekordbox library".format(
+                dfs.df_rbxml.index.size))
+            print("{:>6d} tracks in beets library".format(dfs.df_beets.index.size))
+            print("{:>6d} shared tracks in both".format(df_rbxml_beets.index.size))
 
             if not only_rbxml.empty:
                 print("Only in Rekordbox:")
@@ -191,14 +223,10 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         def rkb_sync_func(lib, opts, args):
             self.config.set_args(opts)
 
-            print("loading '{}'...".format(self.config['xml_filename'].get()))
-            df_rbxml = self.load_rbxml_df(self.config['xml_filename'].get())
+            dfs = self.load_libraries(lib)
 
-            print("loading beets library...")
-            df_beets = self.load_beets_df(lib)
-
-            df_beets_rbxml, df_rbxml_beets, _, _ = self.crop(
-                df_rbxml=df_rbxml, df_beets=df_beets
+            df_beets_rbxml, df_rbxml_beets, _, _ = crop(
+                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
             )
             
             # copy the rating column over
@@ -240,17 +268,12 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         def rkb_make_import_func(lib, opts, args):
             self.config.set_args(opts)
-            if not self.config['xml_outfile'].get():
-                raise ui.UserError('xml_outfile required')
+            xml_path = self.check_xml_outfile()
 
-            print("Loading Rekordbox XML {}...".format(self.config['xml_filename'].get()))
-            df_rbxml = self.load_rbxml_df(self.config['xml_filename'].get())
+            dfs = self.load_libraries(lib)
 
-            print("loading beets library...")
-            df_beets = self.load_beets_df(lib)
-
-            _, _, _, only_beets = self.crop(
-                df_rbxml=df_rbxml, df_beets=df_beets
+            _, _, _, only_beets = crop(
+                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
             )
 
             if only_beets.empty:
@@ -260,23 +283,22 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             outxml = pxml.RekordboxXml(
                 name='rekordbox', version='5.4.3', company='Pioneer DJ'
             )
-            df_beets.set_index('path', inplace=True)
-            for path, row in df_beets.loc[only_beets].iterrows():
+            dfs.df_beets.set_index('path', inplace=True)
+            for path, row in dfs.df_beets.loc[only_beets].iterrows():
                 # TODO figure out why the int boxing is required
                 item = lib.get_item(int(row.id))
 
                 # Strip leading slash because rekordbox doesn't like it
                 track = outxml.add_track(location=path[1:])
 
-                for rb_field, beets_getter in self.FIELDS_TO_RB.items():
+                for rb_field, beets_getter in FIELDS_TO_RB.items():
                     value = beets_getter(item)
                     if value is not None:
                         track[rb_field] = value
                 
-            print("Saving to {}".format(self.config['xml_outfile'].get()))
-            outxml.save(path=self.config['xml_outfile'].get())
+            print("Saving to {}...".format(xml_path))
+            outxml.save(path=xml_path)
 
         rkb_make_import_cmd.func = rkb_make_import_func
 
         return [rkb_report_cmd, rkb_sync_cmd, rkb_make_import_cmd]
-
