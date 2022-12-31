@@ -37,12 +37,13 @@ Be careful - **use a copy of your database** - confirmation flows are not implem
 
 # Installation
 
-Since it is under heavy development, clone the repo and:
+Since it is under heavy development:
 
-```sh
-# in a venv or otherwise partitioned environment
-pip install -e ../path/to/rkbeets
-```
+* Clone [beets](https://github.com/beetbox/beets) and [rkbeets](https://github.com/voigtjr/rkbeets) next to each other
+* Create a virtual environment or similar in `beets` repo: `python -m venv .venv`
+* Install `beets` into that environment
+* `pip install -e ../rkbeets`
+* `beet rkb-report` and friends should work
 
 # License
 
