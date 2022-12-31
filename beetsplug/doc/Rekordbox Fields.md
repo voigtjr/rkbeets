@@ -52,8 +52,7 @@ These should (?) be computed when rekordbox does an analysis job and therefore r
 
 These should be computed from the data. 
 
- * `Kind`: "MP3", etc.
-   * TODO: Figure out the range of possible values here...
+ * `Kind`: `['MP3 File', 'M4A File', 'WAV File']`
  * `Size`
  * `TotalTime`
  * `DateModified`: Unclear if this is filesystem or rekordbox or what, "Date of last modification"
