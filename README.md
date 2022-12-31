@@ -2,38 +2,47 @@
 
 A plugin for integrating Rekordbox XML and [Beets](https://beets.io/).
 
-# Implemented overview
+## Quick tour
 
-Tracks are matched from Rekordbox to beets using file paths.
+_Tested only on recent macos._
+
+If you are just starting with Rekordbox, you can export your beets library for import into Rekordbox. Set `rkbeets.xml_outfile` and:
 
 ```sh
-# Specify at command line or in configuration file
-beet rkb-report -x /path/to/exported.xml
+beet rkb-make-import
 
-# Show information about beets/rbxml
+# Or, using query results
+beet rkb-make-import artist:radiohead
+```
+
+If you export your Rekordbox library and set the configuration key `rkbeets.xml_outfile`, you can see how many tracks you have in each (considering only the configured beets music directory):
+
+```sh
 beet rkb-report
 
-# Copy metadata into beets from tracks found in rekordbox
-beet rkb-sync
-
-# Generate XML file to import into rekordbox
-beet rkbeets make-import --missing # Tracks in beets but missing in rb
-beet rkbeets make-import # Everything
+# To see the paths for tracks not in both libraries
+beet rkb-report --verbose
 ```
 
-# Planned interfaces
+Tracks are matched between Rekordbox and beets using file paths.
+
+Although only currently implemented for the 'Rating' field, this command lets you sync metadata from Rekordbox to beets:
 
 ```sh
-beet rkbeets make-import --missing artist:dream # Same but with a query
-beet rkbeets make-import artist:dream # Same but with a query
+beet rkb-sync
+beet rkb-sync artist:radiohead
 ```
 
-## Interesting and related work
+Be careful - **use a copy of your database** - confirmation flows are not implemented.
 
-- [Structured comments plugin](https://github.com/michaeltoohig/BeetsPluginStructuredComments)
-- [Describe plugin](https://github.com/adamjakab/BeetsPluginDescribe)
-- [Xtractor plugin](https://github.com/adamjakab/BeetsPluginXtractor)
-- [Pyrekordbox](https://pyrekordbox.readthedocs.io/en/latest/)
+# Installation
+
+Since it is under heavy development, clone the repo and:
+
+```sh
+# in a venv or otherwise partitioned environment
+pip install -e ../path/to/rkbeets
+```
 
 # License
 

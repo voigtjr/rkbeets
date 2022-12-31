@@ -124,12 +124,12 @@ def load_rbxml_df(xml_path):
     df['Location'] = '/' + df['Location']
     return df
 
-def load_beets_df(lib):
+def load_beets_df(lib, query=None):
     d = defaultdict(list)
-    items = lib.items()
+    items = lib.items(query)
 
     with tqdm(total=len(items), unit='tracks') as pbar:
-        for item in lib.items():
+        for item in items:
             d['id'].append(item['id'])
             d['rating'].append(item.get('rating', default=-1))
             d['path'].append(item.path.decode('utf-8'))
@@ -198,12 +198,12 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         return None
 
-    def load_libraries(self, lib=None, rkb_required=True):
+    def load_libraries(self, lib=None, query=None, rkb_required=True):
         df_rbxml = self.load_rkb_library(required=rkb_required)
 
         if lib is not None:
             print("loading beets library...")
-            df_beets = load_beets_df(lib)
+            df_beets = load_beets_df(lib, query)
             return LibraryDataframes(df_rbxml, df_beets)
 
         return LibraryDataframes(df_rbxml)
@@ -226,6 +226,11 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             help=u'xml file exported from rekordbox'
         )
 
+        rkb_report_cmd.parser.add_option(
+            '-v', '--verbose', dest='verbose', action='store_true', default=False,
+            help="print out paths for tracks not in the others' library (excludes files outside of beets music directory)"
+        )
+
         def rkb_report_func(lib, opts, args):
             self.config.set_args(opts)
 
@@ -240,15 +245,16 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             print("{:>6d} tracks in beets library".format(dfs.df_beets.index.size))
             print("{:>6d} shared tracks in both".format(df_rbxml_beets.index.size))
 
-            if not only_rbxml.empty:
-                print("Only in Rekordbox:")
-                for path in only_rbxml:
-                    print("    ", path)
+            if opts.verbose:
+                if not only_rbxml.empty:
+                    print("Only in Rekordbox:")
+                    for path in only_rbxml:
+                        print("    ", path)
 
-            if not only_beets.empty:
-                print("Only in beets:")
-                for path in only_beets:
-                    print("    ", path)
+                if not only_beets.empty:
+                    print("Only in beets:")
+                    for path in only_beets:
+                        print("    ", path)
 
         rkb_report_cmd.func = rkb_report_func
 
@@ -262,8 +268,7 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         def rkb_sync_func(lib, opts, args):
             self.config.set_args(opts)
-
-            dfs = self.load_libraries(lib)
+            dfs = self.load_libraries(lib, query=ui.decargs(args))
 
             df_beets_rbxml, df_rbxml_beets, _, _ = crop(
                 df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
@@ -313,18 +318,16 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         )
 
         def rkb_make_import_func(lib, opts, args):
-            if len(args) != 0:
-                raise ui.UserError("query not yet implemented")
-
             self.config.set_args(opts)
             xml_path = self.check_xml_outfile()
 
-            rkb_required = opts.missing
-            dfs = self.load_libraries(lib, rkb_required=rkb_required)
+            dfs = self.load_libraries(
+                lib, query=ui.decargs(args), rkb_required=opts.missing
+            )
 
             if opts.missing:
                 _, _, _, only_beets = crop(
-                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
+                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets,
                 )
 
                 if only_beets.empty:
