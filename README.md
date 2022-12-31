@@ -50,8 +50,6 @@ Tracks are matched between the two only by using file paths.
 
 ### Copy metadata from rekordbox into beets with `rkb-sync`
 
-(Currently only implemented for the rekordbox `Rating` field.)
-
 The `rkb-sync` command lets you pull metadata from rekordbox into beets. 
 
 ```sh
@@ -61,6 +59,15 @@ beet rkb-sync
 # only consider shared tracks that satisfy a query
 beet rkb-sync artist:radiohead
 ```
+
+Currently implemented for these fields:
+
+* `Rating`
+* `TrackID`
+* `DateAdded`
+* `PlayCount`
+* `Remixer`
+* `Mix`
 
 ### Importing from rekordbox to beets
 
