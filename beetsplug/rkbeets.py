@@ -36,12 +36,13 @@ from beets.dbcore import types
 from beets import ui
 from beets import util
 import pandas
+from tqdm import tqdm
 
 # pyrekordbox is chatty about missing/broken rekordbox configuration files
 previous_level = logging.root.manager.disable
 logging.disable(logging.CRITICAL)
 try:
-    import pyrekordbox.xml as pxml
+    import pyrekordbox.xml as pxml # type: ignore
 finally:
     logging.disable(previous_level)
 
@@ -112,23 +113,52 @@ def load_rbxml_df(xml_path):
 
     xml = pxml.RekordboxXml(xml_path)
     d = defaultdict(list)
-    for t in xml.get_tracks():
-        if t['Location'].lower().startswith(music_directory[1:].lower()):
-            for attr in t.ATTRIBS:
-                d[attr].append(t[attr])
+    tracks = xml.get_tracks()
+    with tqdm(total=len(tracks), unit='tracks') as pbar:
+        for t in xml.get_tracks():
+            if t['Location'].lower().startswith(music_directory[1:].lower()):
+                for attr in t.ATTRIBS:
+                    d[attr].append(t[attr])
+            pbar.update()
     df = pandas.DataFrame(data=d)
     df['Location'] = '/' + df['Location']
     return df
 
 def load_beets_df(lib):
     d = defaultdict(list)
+    items = lib.items()
 
-    for item in lib.items():
-        d['id'].append(item['id'])
-        d['rating'].append(item.get('rating', default=-1))
-        d['path'].append(item.path.decode('utf-8'))
+    with tqdm(total=len(items), unit='tracks') as pbar:
+        for item in lib.items():
+            d['id'].append(item['id'])
+            d['rating'].append(item.get('rating', default=-1))
+            d['path'].append(item.path.decode('utf-8'))
+            pbar.update()
 
     return pandas.DataFrame(data=d)
+
+def make_import(xml_path, lib, df_path_id):
+    outxml = pxml.RekordboxXml(
+        name='rekordbox', version='5.4.3', company='Pioneer DJ'
+    )
+    
+    print("Transforming {} tracks to xml...".format(df_path_id.size))
+    with tqdm(total=df_path_id.size, unit='tracks') as pbar:
+        for path, id in df_path_id.items():
+            # TODO figure out why the int boxing is required
+            item = lib.get_item(int(id))
+
+            # Strip leading slash because rekordbox doesn't like it
+            track = outxml.add_track(location=path[1:])
+
+            for rb_field, beets_getter in FIELDS_TO_RB.items():
+                value = beets_getter(item)
+                if value is not None:
+                    track[rb_field] = value
+            pbar.update()
+        
+    print("Writing to {}...".format(xml_path))
+    outxml.save(path=xml_path)
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
     # Flexible attribute typing
@@ -147,19 +177,29 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             'xml_outfile': None,
         })
 
-    def load_libraries(self, lib=None):
-        if not self.config['xml_filename']:
-            raise ui.UserError("xml_filename required")
+    def load_rkb_library(self, required=True):
+        try:
+            if not self.config['xml_filename']:
+                raise ui.UserError("xml_filename required")
 
-        xml_path = Path(self.config['xml_filename'].get()).resolve()
-        if not xml_path.exists():
-            raise ui.UserError("xml_filename doesn't exist: {}".format(xml_path))
-        
-        if not xml_path.is_file():
-            raise ui.UserError("xml_filename not a file: {}".format(xml_path))
+            xml_path = Path(self.config['xml_filename'].get()).resolve()
+            if not xml_path.exists():
+                raise ui.UserError("xml_filename doesn't exist: {}".format(xml_path))
+            
+            if not xml_path.is_file():
+                raise ui.UserError("xml_filename not a file: {}".format(xml_path))
 
-        print("loading '{}'...".format(xml_path))
-        df_rbxml = load_rbxml_df(xml_path)
+            print("loading '{}'...".format(xml_path))
+            return load_rbxml_df(xml_path)
+
+        except ui.UserError:
+            if required:
+                raise
+
+        return None
+
+    def load_libraries(self, lib=None, rkb_required=True):
+        df_rbxml = self.load_rkb_library(required=rkb_required)
 
         if lib is not None:
             print("loading beets library...")
@@ -195,7 +235,7 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
                 df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
             )
 
-            print("{:>6d} tracks in rekordbox library".format(
+            print("{:>6d} tracks in rekordbox library (in beets directory)".format(
                 dfs.df_rbxml.index.size))
             print("{:>6d} tracks in beets library".format(dfs.df_beets.index.size))
             print("{:>6d} shared tracks in both".format(df_rbxml_beets.index.size))
@@ -253,51 +293,50 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         rkb_sync_cmd.func = rkb_sync_func
 
         rkb_make_import_cmd = ui.Subcommand(
-            'rkb-make-import', help='sync metadata from rekordbox xml to beets database'
+            'rkb-make-import',
+            help="sync metadata from rekordbox xml to beets database"
         )
 
         rkb_make_import_cmd.parser.add_option(
             '-x', '--xml-filename', dest='xml_filename',
-            help=u'xml file exported from rekordbox'
+            help="xml file exported from rekordbox"
         )
 
         rkb_make_import_cmd.parser.add_option(
             '-o', '--xml-outfile', dest='xml_outfile',
-            help=u'file where beets will write xml for import into rekordbox'
+            help="file where beets will write xml for import into rekordbox"
+        )
+
+        rkb_make_import_cmd.parser.add_option(
+            '-m', '--missing', dest='missing', action='store_true', default=False,
+            help="only consider files not already in rekordbox"
         )
 
         def rkb_make_import_func(lib, opts, args):
+            if len(args) != 0:
+                raise ui.UserError("query not yet implemented")
+
             self.config.set_args(opts)
             xml_path = self.check_xml_outfile()
 
-            dfs = self.load_libraries(lib)
+            rkb_required = opts.missing
+            dfs = self.load_libraries(lib, rkb_required=rkb_required)
 
-            _, _, _, only_beets = crop(
-                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
-            )
+            if opts.missing:
+                _, _, _, only_beets = crop(
+                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
+                )
 
-            if only_beets.empty:
-                print("nothing to do: no tracks are missing from rekordbox")
+                if only_beets.empty:
+                    print("nothing to do: no tracks are missing from rekordbox")
+                    return
+
+                dfs.df_beets.set_index('path', inplace=True)
+                make_import(xml_path, lib, dfs.df_beets.loc[only_beets]['id'])
                 return
-
-            outxml = pxml.RekordboxXml(
-                name='rekordbox', version='5.4.3', company='Pioneer DJ'
-            )
+            
             dfs.df_beets.set_index('path', inplace=True)
-            for path, row in dfs.df_beets.loc[only_beets].iterrows():
-                # TODO figure out why the int boxing is required
-                item = lib.get_item(int(row.id))
-
-                # Strip leading slash because rekordbox doesn't like it
-                track = outxml.add_track(location=path[1:])
-
-                for rb_field, beets_getter in FIELDS_TO_RB.items():
-                    value = beets_getter(item)
-                    if value is not None:
-                        track[rb_field] = value
-                
-            print("Saving to {}...".format(xml_path))
-            outxml.save(path=xml_path)
+            make_import(xml_path, lib, dfs.df_beets['id'])
 
         rkb_make_import_cmd.func = rkb_make_import_func
 
