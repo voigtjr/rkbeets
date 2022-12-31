@@ -8,28 +8,45 @@ Python 3.10. Be careful - **use a copy of your database** - there are no confirm
 
 _Tested only on recent macos._
 
+### Data input and output
+
+* The plugin will export data for import into rekordbox using the option `export-file`.
+* Some commands use data from rekordbox, provided to beets via the option `rekordbox-file`.
+* Setting the configuration options cleans up the command line, e.g.:
+
+`.config/beets/config.yaml`:
+```yaml 
+rkbeets:
+    export-file: ~/Documents/rekordbox/rekordbox.xml
+    rekordbox-file: ~/Documents/rekordbox/export.xml
+```
+
 ### Export beets to rekordbox with `rkb-export`
 
-You can export your beets library for import into rekordbox with `rkb-export`:
+Export your beets library for import into rekordbox with `rkb-export`:
 
 ```sh
-# beets library -exported-to-> rekordbox xml
-beet rkb-export --export-file ~/Documents/rekordbox/rekordbox.xml
+# beets library -exported-to-> rekordbox
+beet rkb-export
 
-# export using query results and the export-file set in beets config
-beet rkb-export artist:radiohead
+# only export files missing from rekordbox, requires `rekordbox-file`
+beet rkb-export --missing
+
+# export only missing files further filtered by a query
+beet rkb-export artist:radiohead --missing
 ```
 
 ### Inspect beets and rekordbox differences with `rkb-diff`
 
-If you export your rekordbox library, you can see how many tracks they share in the beets media directory tree and lists of those tracks that aren't shared, with `rkb-diff`:
+
+Inspect how many tracks are shareed between the two libraries (and a list of those that aren't) with `rkb-diff`:
 
 ```sh
 # rekordbox exported xml -compared-to-> beets library
-beet rkb-diff --import-file ~/Documents/export.xml
+beet rkb-diff
 ```
 
-Tracks are matched between rekordbox and beets only by using file paths.
+Tracks are matched between the two only by using file paths.
 
 ### Copy metadata from rekordbox into beets with `rkb-sync`
 
@@ -47,7 +64,7 @@ beet rkb-sync artist:radiohead
 
 ### Importing from rekordbox to beets
 
-Just import the files normally using the `import` command.
+Import files using `beets import`.
 
 # Installation
 
