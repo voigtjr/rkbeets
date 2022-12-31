@@ -8,22 +8,24 @@ Tracks are matched from Rekordbox to beets using file paths.
 
 ```sh
 # Specify at command line or in configuration file
-beet rkbeets -x /path/to/exported.xml
+beet rkb-report -x /path/to/exported.xml
 
 # Show information about beets/rbxml
-beet rkbeets report
+beet rkb-report
 
 # Copy metadata into beets from tracks found in rekordbox
-beet rkbeets sync
+beet rkb-sync
+
+# Generate XML file to import into rekordbox
+beet rkbeets make-import --missing # Tracks in beets but missing in rb
+beet rkbeets make-import # Everything
 ```
 
 # Planned interfaces
 
 ```sh
-# Generate XML file to import into rekordbox
-beet rkbeets make-import --missing # Tracks in beets but missing in rb
 beet rkbeets make-import --missing artist:dream # Same but with a query
-beet rkbeets make-import # Everything
+beet rkbeets make-import artist:dream # Same but with a query
 ```
 
 ## Interesting and related work
