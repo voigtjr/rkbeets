@@ -137,7 +137,7 @@ def load_beets_df(lib, query=None):
 
     return pandas.DataFrame(data=d)
 
-def make_import(xml_path, lib, df_path_id):
+def export(xml_path, lib, df_path_id):
     outxml = pxml.RekordboxXml(
         name='rekordbox', version='5.4.3', company='Pioneer DJ'
     )
@@ -173,21 +173,21 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         super().__init__()
 
         self.config.add({
-            'xml_filename': None,
-            'xml_outfile': None,
+            'export_file': None,
+            'rekordbox_file': None,
         })
 
     def load_rkb_library(self, required=True):
         try:
-            if not self.config['xml_filename']:
-                raise ui.UserError("xml_filename required")
+            if not self.config['rekordbox_file']:
+                raise ui.UserError("rekordbox_file required")
 
-            xml_path = Path(self.config['xml_filename'].get()).resolve()
+            xml_path = Path(self.config['rekordbox_file'].get()).resolve()
             if not xml_path.exists():
-                raise ui.UserError("xml_filename doesn't exist: {}".format(xml_path))
+                raise ui.UserError("rekordbox_file doesn't exist: {}".format(xml_path))
             
             if not xml_path.is_file():
-                raise ui.UserError("xml_filename not a file: {}".format(xml_path))
+                raise ui.UserError("rekordbox_file not a file: {}".format(xml_path))
 
             print("loading '{}'...".format(xml_path))
             return load_rbxml_df(xml_path)
@@ -208,30 +208,73 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         return LibraryDataframes(df_rbxml)
     
-    def check_xml_outfile(self):
-        if not self.config['xml_outfile']:
-            raise ui.UserError('xml_outfile required')
+    def check_export_file(self):
+        if not self.config['export_file']:
+            raise ui.UserError('export_file required')
 
-        xml_path = Path(self.config['xml_outfile'].get()).resolve()
+        xml_path = Path(self.config['export_file'].get()).resolve()
         if xml_path.is_dir():
             raise ui.UserError("xml_outdir is a directory: {}".format(xml_path))
         return xml_path
 
     def commands(self):
-        rkb_report_cmd = ui.Subcommand(
-            'rkb-report', help='show information about the rekordbox and beets libraries'
-        )
-        rkb_report_cmd.parser.add_option(
-            '-x', '--xml-filename', dest='xml_filename',
-            help=u'xml file exported from rekordbox'
+        rkb_export_cmd = ui.Subcommand(
+            'rkb-export',
+            help="export beets library for import into rekordbox"
         )
 
-        rkb_report_cmd.parser.add_option(
-            '-v', '--verbose', dest='verbose', action='store_true', default=False,
-            help="print out paths for tracks not in the others' library (excludes files outside of beets music directory)"
+        rkb_export_cmd.parser.add_option(
+            '-e', '--export-file', dest='export_file',
+            help="target file for beets data exported for rekordbox"
         )
 
-        def rkb_report_func(lib, opts, args):
+        rkb_export_cmd.parser.add_option(
+            '-r', '--rekordbox-file', dest='rekordbox_file',
+            help="rekordbox xml library"
+        )
+
+        rkb_export_cmd.parser.add_option(
+            '-m', '--missing', dest='missing', action='store_true', default=False,
+            help="only consider files not already in rekordbox library"
+        )
+
+        def rkb_export_func(lib, opts, args):
+            self.config.set_args(opts)
+            xml_path = self.check_export_file()
+
+            dfs = self.load_libraries(
+                lib, query=ui.decargs(args), rkb_required=opts.missing
+            )
+
+            if opts.missing:
+                _, _, _, only_beets = crop(
+                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets,
+                )
+
+                if only_beets.empty:
+                    print("nothing to do: no tracks are missing from rekordbox")
+                    return
+
+                dfs.df_beets.set_index('path', inplace=True)
+                export(xml_path, lib, dfs.df_beets.loc[only_beets]['id'])
+                return
+            
+            dfs.df_beets.set_index('path', inplace=True)
+            export(xml_path, lib, dfs.df_beets['id'])
+
+        rkb_export_cmd.func = rkb_export_func
+
+        rkb_diff_cmd = ui.Subcommand(
+            'rkb-diff',
+            help='show information and differences between the rekordbox and beets libraries'
+        )
+
+        rkb_diff_cmd.parser.add_option(
+            '-r', '--rekordbox-file', dest='rekordbox_file',
+            help="rekordbox xml library"
+        )
+
+        def rkb_diff_func(lib, opts, args):
             self.config.set_args(opts)
 
             dfs = self.load_libraries(lib)
@@ -245,25 +288,24 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             print("{:>6d} tracks in beets library".format(dfs.df_beets.index.size))
             print("{:>6d} shared tracks in both".format(df_rbxml_beets.index.size))
 
-            if opts.verbose:
-                if not only_rbxml.empty:
-                    print("Only in Rekordbox:")
-                    for path in only_rbxml:
-                        print("    ", path)
+            if not only_rbxml.empty:
+                print("Only in Rekordbox:")
+                for path in only_rbxml:
+                    print("    ", path)
 
-                if not only_beets.empty:
-                    print("Only in beets:")
-                    for path in only_beets:
-                        print("    ", path)
+            if not only_beets.empty:
+                print("Only in beets:")
+                for path in only_beets:
+                    print("    ", path)
 
-        rkb_report_cmd.func = rkb_report_func
+        rkb_diff_cmd.func = rkb_diff_func
 
         rkb_sync_cmd = ui.Subcommand(
             'rkb-sync', help='sync metadata from rekordbox xml to beets database'
         )
         rkb_sync_cmd.parser.add_option(
-            '-x', '--xml-filename', dest='xml_filename',
-            help=u'xml file exported from rekordbox'
+            '-r', '--rekordbox-file', dest='rekordbox_file',
+            help="rekordbox xml library"
         )
 
         def rkb_sync_func(lib, opts, args):
@@ -297,50 +339,4 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         rkb_sync_cmd.func = rkb_sync_func
 
-        rkb_make_import_cmd = ui.Subcommand(
-            'rkb-make-import',
-            help="sync metadata from rekordbox xml to beets database"
-        )
-
-        rkb_make_import_cmd.parser.add_option(
-            '-x', '--xml-filename', dest='xml_filename',
-            help="xml file exported from rekordbox"
-        )
-
-        rkb_make_import_cmd.parser.add_option(
-            '-o', '--xml-outfile', dest='xml_outfile',
-            help="file where beets will write xml for import into rekordbox"
-        )
-
-        rkb_make_import_cmd.parser.add_option(
-            '-m', '--missing', dest='missing', action='store_true', default=False,
-            help="only consider files not already in rekordbox"
-        )
-
-        def rkb_make_import_func(lib, opts, args):
-            self.config.set_args(opts)
-            xml_path = self.check_xml_outfile()
-
-            dfs = self.load_libraries(
-                lib, query=ui.decargs(args), rkb_required=opts.missing
-            )
-
-            if opts.missing:
-                _, _, _, only_beets = crop(
-                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets,
-                )
-
-                if only_beets.empty:
-                    print("nothing to do: no tracks are missing from rekordbox")
-                    return
-
-                dfs.df_beets.set_index('path', inplace=True)
-                make_import(xml_path, lib, dfs.df_beets.loc[only_beets]['id'])
-                return
-            
-            dfs.df_beets.set_index('path', inplace=True)
-            make_import(xml_path, lib, dfs.df_beets['id'])
-
-        rkb_make_import_cmd.func = rkb_make_import_func
-
-        return [rkb_report_cmd, rkb_sync_cmd, rkb_make_import_cmd]
+        return [rkb_export_cmd, rkb_diff_cmd, rkb_sync_cmd]
