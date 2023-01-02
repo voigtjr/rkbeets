@@ -65,7 +65,7 @@ def get_format(i):
 
 def get_samplerate(i):
     value = i.get('samplerate')
-    return None if value is None else value / 1000
+    return None if value is None else value * 1000.0
 
 FIELDS_TO_RB = {
     'Name':         lambda i: i.get('title'),
@@ -177,6 +177,7 @@ def load_beets_df(lib, query=None):
     with tqdm(total=len(items), unit='tracks') as pbar:
         for item in items:
             d['id'].append(item['id'])
+            d['samplerate'].append(item.get('samplerate'))
             d['format'].append(item.get('format'))
             d['rating'].append(item.get('rating', default=0))
             d['rkb-TrackID'].append(item.get('rkb-TrackID', default=0))
