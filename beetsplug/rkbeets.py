@@ -38,6 +38,8 @@ from beets import util
 import pandas
 from tqdm import tqdm
 
+VERSION = '0.1.0'
+
 # pyrekordbox is chatty about missing/broken rekordbox configuration files
 previous_level = logging.root.manager.disable
 logging.disable(logging.CRITICAL)
