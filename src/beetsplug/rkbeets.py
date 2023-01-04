@@ -25,7 +25,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -34,7 +34,6 @@ from beets import config
 from beets import plugins
 from beets.dbcore import types
 from beets import ui
-from beets import util
 import pandas
 from tqdm import tqdm
 
@@ -48,73 +47,30 @@ try:
 finally:
     logging.disable(previous_level)
 
+LibraryDataFrames = namedtuple('LibraryDataFrames', ['rbxml', 'beets'])
 
-@dataclass
-class LibraryDataframes:
-    df_rbxml: pandas.DataFrame
-    df_beets: pandas.DataFrame = None
-
-def get_format(i):
-    # ['MP3 File', 'M4A File', 'WAV File']
-    value = i.get('format')
+def format_to_kind(value):
     if value == 'AAC':
         return 'M4A File'
     if value == 'MP3':
         return 'MP3 File'
-    return 'Unknown'
+    if value == 'WAV':
+        return 'WAV File'
+    return value
 
-def get_samplerate(i):
-    value = i.get('samplerate')
-    return None if value is None else value * 1000.0
-
-FIELDS_TO_RB = {
-    'Name':         lambda i: i.get('title'),
-    'Artist':       lambda i: i.get('artist'),
-    'Composer':     lambda i: i.get('composer'),
-    'Album':        lambda i: i.get('album'),
-    'Grouping':     lambda i: i.get('grouping'),
-    'Genre':        lambda i: i.get('genre'),
-    'Kind':         get_format,
-    'Size':         lambda i: i.get('filesize'), # Item getter calls try_filesize()
-    'TotalTime':    lambda i: i.get('length'),
-    'DiscNumber':   lambda i: i.get('disc'),
-    'TrackNumber':  lambda i: i.get('track'),
-    'Year':         lambda i: i.get('year'),
-    'BitRate':      lambda i: i.get('bitrate'),
-    'SampleRate':   get_samplerate, # Beets is in kHz, RB in Hz
-    'Comments':     lambda i: i.get('comments'),
-    'Rating':       lambda i: i.get('rating'),
-    'Remixer':      lambda i: i.get('remixer'),
-    'Label':        lambda i: i.get('label'),
-    # 'Location':     lambda i: i.get('path'), # Set in ctor
-    # 'AverageBpm':   None,
-    # 'DateModified': None,
-    # 'DateAdded':    None,
-    # 'Tonality':     None,
-    # 'Mix':          None,           # TODO: capture?
-    # 'Colour':       None,           # TODO: capture?
-}
-
-def crop(df_rbxml, df_beets):
-    # TODO report on normalization errors? definitely on inconsistent spaces
-    df_rbxml_index = df_rbxml['Location'].str.normalize('NFD').str.lower()
-    df_rbxml = df_rbxml.set_index(df_rbxml_index)
-
+def crop(dfs: LibraryDataFrames):
     # Filter tracks outside of music directory
     music_directory = config['directory'].get()
-    rbxml_in_beets_dir = df_rbxml.index.str.startswith(music_directory.lower())
-    df_rbxml = df_rbxml[rbxml_in_beets_dir]
-
-    df_beets_index = df_beets['path'].str.normalize('NFD').str.lower()
-    df_beets = df_beets.set_index(df_beets_index)
+    rbxml_in_beets_dir = dfs.rbxml.index.str.startswith(music_directory.lower())
+    df_rbxml = dfs.rbxml[rbxml_in_beets_dir]
 
     # Crop both down to paths intersection
-    df_rbxml_beets = df_rbxml.loc[df_rbxml.index.intersection(df_beets.index)]
-    df_beets_rbxml = df_beets.loc[df_beets.index.intersection(df_rbxml_beets.index)]
+    df_rbxml_beets = df_rbxml.loc[df_rbxml.index.intersection(dfs.beets.index)]
+    df_beets_rbxml = dfs.beets.loc[dfs.beets.index.intersection(df_rbxml_beets.index)]
 
     # Save the differences
-    only_rbxml = df_rbxml.loc[df_rbxml.index.difference(df_beets.index)]['Location']
-    only_beets = df_beets.loc[df_beets.index.difference(df_rbxml_beets.index)]['path']
+    only_rbxml = df_rbxml.index.difference(dfs.beets.index)
+    only_beets = dfs.beets.index.difference(df_rbxml_beets.index)
 
     # Make them the same
     df_beets_rbxml.sort_index(inplace=True)
@@ -124,118 +80,172 @@ def crop(df_rbxml, df_beets):
 
     return df_common, only_rbxml, only_beets
 
-def load_rbxml_df(xml_path):
+def load_rbxml(xml_path):
+    # Types from https://cdn.rekordbox.com/files/20200410160904/xml_format_list.pdf
+    # TODO combine this list and the other two in this file into one dataframe-backed data structure
+    COLUMNS = {
+        'Album': 'string',
+        'Artist': 'string',
+        'AverageBpm': 'float64',
+        'BitRate': 'int32',
+        'Colour': 'string',
+        'Comments': 'string',
+        'Composer': 'string',
+        'DateAdded': 'string',
+        'DateModified': 'string',
+        'DiscNumber': 'int32',
+        'Genre': 'string',
+        'Grouping': 'string',
+        'Kind': 'string',
+        'Label': 'string',
+        'LastPlayed': 'string',
+        'Location': 'string',
+        'Mix': 'string',
+        'Name': 'string',
+        'PlayCount': 'int32',
+        'Rating': 'int32',
+        'Remixer': 'string',
+        'SampleRate': 'float64',
+        'Size': 'int64',
+        'Tonality': 'string',
+        'TotalTime': 'float64',
+        'TrackID': 'int64',
+        'TrackNumber': 'int32',
+        'Year': 'int32',
+    }
+
     xml = pxml.RekordboxXml(xml_path)
     d = defaultdict(list)
     tracks = xml.get_tracks()
     with tqdm(total=len(tracks), unit='tracks') as pbar:
         for t in xml.get_tracks():
-            for attr in t.ATTRIBS:
-                d[attr].append(t[attr])
+            for col, dtype in COLUMNS.items():
+                d[(col, dtype)].append(t[col])
             pbar.update()
+    return d
 
-    # Convert these columns
-    FIELD_DATA_TYPES = {
-        'Name': 'string',
-        'Artist': 'string',
-        'Composer': 'string',
-        'Album': 'string',
-        'Grouping': 'string',
-        'Genre': 'string',
-        'Kind': 'string',
-        'DateModified': 'string',
-        'DateAdded': 'string',
-        'Comments': 'string',
-        'LastPlayed': 'string',
-        'Location': 'string',
-        'Remixer': 'string',
-        'Tonality': 'string',
-        'Label': 'string',
-        'Mix': 'string',
-        'Colour': 'string',
-        'DiscNumber': 'int32',
-        'TrackNumber': 'int32',
-        'Year': 'int32',
-        'BitRate': 'int32',
-        'PlayCount': 'int32',
-        'Rating': 'int32',
+def load_rbxml_df(xml_data):
+    data = {
+        col: pandas.Series(values, dtype=dtype)
+        for (col, dtype), values in xml_data.items()
     }
-    for attr, values in d.items():
-        t = FIELD_DATA_TYPES.get(attr)
-        if t is not None:
-            d[attr] = pandas.Series(values, dtype=t)
 
-    df = pandas.DataFrame(data=d)
+    df = pandas.DataFrame(data=data)
+
     # Prepend a slash to the paths, Rekordbox removes this
     df['Location'] = '/' + df['Location']
+
+    # TODO report on normalization errors? definitely on inconsistent spaces
+    index = df['Location'].str.normalize('NFD').str.lower()
+    return df.set_index(index)
+
+def load_beets_df(items):
+    # beets field, dtype
+    COLUMNS = [
+        ('album', 'string'),
+        ('artist', 'string'),
+        ('bitrate', 'int32'),
+        ('comments', 'string'),
+        ('composer', 'string'),
+        ('disc', 'int32'),
+        ('filesize', 'int64'),
+        ('format', 'string'),
+        ('genre', 'string'),
+        ('grouping', 'string'),
+        ('id', 'int32'),
+        ('label', 'string'),
+        ('length', 'int32'),
+        ('path', 'bytes'),
+        ('remixer', 'string'),
+        ('samplerate', 'int32'),
+        ('title', 'string'),
+        ('track', 'int32'),
+        ('year', 'int32'),
+
+        # Rekordbox-specific fields are prefixed and can be null (e.g. Int32)
+        ('rkb-DateAdded', 'string'),
+        ('rkb-Mix', 'string'),
+        ('rkb-PlayCount', 'Int32'),
+        ('rkb-Rating', 'Int32'),
+        ('rkb-TrackID', 'Int64'),
+    ]
+
+    series_data = {
+        field: pandas.Series([i.get(field) for i in items], dtype=dtype)
+        for field, dtype in COLUMNS 
+    }
+    df = pandas.DataFrame(data=series_data)
+    index = df['path'].str.decode('utf-8').str.normalize('NFD').str.lower()
+    return df.set_index(index)
+
+def get_export_df(df_beets):
+    df = df_beets.rename(columns={
+        'album': 'Album',
+        'artist': 'Artist',
+        # 'AverageBpm'
+        'bitrate': 'BitRate',
+        # 'Colour': None,
+        'comments': 'Comments',
+        'composer': 'Composer',
+        'rkb-DateAdded': 'DateAdded',
+        # 'DateModified'
+        'disc': 'DiscNumber',
+        'genre': 'Genre',
+        'grouping': 'Grouping',
+        'format': 'Kind',
+        'label': 'Label',
+        # 'LastPlayed'
+        'rkb-Mix': 'Mix',
+        'title': 'Name',
+        'rkb-PlayCount': 'PlayCount',
+        'rkb-Rating': 'Rating',
+        'remixer': 'Remixer',
+        'samplerate': 'SampleRate',
+        'filesize': 'Size',
+        # 'Tonality'
+        'length': 'TotalTime',
+        # 'rkb-TrackID': 'TrackID', # read only
+        'track': 'TrackNumber',
+        'year': 'Year',
+    }, errors='raise').drop(columns=['id', 'path', 'rkb-TrackID'])
+ 
+    # Fill nulls for import
+    df[['DateAdded', 'Mix']] = df[['DateAdded', 'Mix']].fillna('')
+    df[['PlayCount', 'Rating']] = df[['PlayCount', 'Rating']].fillna(0)
+
+    # Required conversions
+    df['SampleRate'] = df['SampleRate'].transform(lambda v: v * 1000.0)
+    df['Kind'] = df['Kind'].transform(format_to_kind)
+
     return df
 
-def load_beets_df(lib, query=None):
-    d = defaultdict(list)
-    items = lib.items(query)
-
-    with tqdm(total=len(items), unit='tracks') as pbar:
-        for item in items:
-            d['id'].append(item['id'])
-            d['samplerate'].append(item.get('samplerate'))
-            d['format'].append(item.get('format'))
-            d['rating'].append(item.get('rating', default=0))
-            d['rkb-TrackID'].append(item.get('rkb-TrackID', default=0))
-            d['rkb-DateAdded'].append(item.get('rkb-DateAdded', default='1970-01-01'))
-            d['rkb-PlayCount'].append(item.get('rkb-PlayCount', default=0))
-            d['rkb-Remixer'].append(item.get('rkb-Remixer', default=''))
-            d['rkb-Mix'].append(item.get('rkb-Mix', default=''))
-            d['path'].append(item.path.decode('utf-8'))
-            pbar.update()
-
-    # Convert these
-    FIELD_DATA_TYPES = {
-        'format': 'string',
-        'rating': 'int32',
-        'rkb-DateAdded': 'string',
-        'rkb-PlayCount': 'int32',
-        'rkb-Remixer': 'string',
-        'rkb-Mix': 'string',
-        'path': 'string',
-    }
-    for attr, values in d.items():
-        t = FIELD_DATA_TYPES.get(attr)
-        if t is not None:
-            d[attr] = pandas.Series(values, dtype=t)
-
-    return pandas.DataFrame(data=d)
-
-def export(xml_path, lib, df_path_id):
+def export_df(xml_path, df):
     outxml = pxml.RekordboxXml(
         name='rekordbox', version='5.4.3', company='Pioneer DJ'
     )
-    
-    print("Transforming {} tracks to xml...".format(df_path_id.size))
-    with tqdm(total=df_path_id.size, unit='tracks') as pbar:
-        for path, id in df_path_id.items():
-            # TODO figure out why the int boxing is required
-            item = lib.get_item(int(id))
+
+    with tqdm(total=df.index.size, unit='tracks') as pbar:
+        for row in df.itertuples():
+            # We need the Index (path/Location) but it can't stay in the dict
+            data = row._asdict()
+            
+            # TODO this is incorrectly-cased (it's lower()ed)
+            path = data.pop('Index')
 
             # Strip leading slash because rekordbox doesn't like it
-            track = outxml.add_track(location=path[1:])
-
-            for rb_field, beets_getter in FIELDS_TO_RB.items():
-                value = beets_getter(item)
-                if value is not None:
-                    track[rb_field] = value
+            outxml.add_track(location=path[1:], **data)
             pbar.update()
-        
+
     print("Writing to {}...".format(xml_path))
     outxml.save(path=xml_path)
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
     # Flexible attribute typing
     item_types = {
-        'rating': types.INTEGER,
+        'rkb-Rating': types.INTEGER,
         'rkb-TrackID': types.INTEGER,
         'rkb-DateAdded': types.STRING,
         'rkb-PlayCount': types.INTEGER,
-        'rkb-Remixer': types.STRING,
         'rkb-Mix': types.STRING,
     }
 
@@ -260,7 +270,8 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
                 raise ui.UserError("rekordbox_file not a file: {}".format(xml_path))
 
             print("loading '{}'...".format(xml_path))
-            return load_rbxml_df(xml_path)
+            xml_data = load_rbxml(xml_path)
+            return load_rbxml_df(xml_data)
 
         except ui.UserError:
             if required:
@@ -273,10 +284,10 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         if lib is not None:
             print("loading beets library...")
-            df_beets = load_beets_df(lib, query)
-            return LibraryDataframes(df_rbxml, df_beets)
+            df_beets = load_beets_df(lib.items(query))
+            return LibraryDataFrames(df_rbxml, df_beets)
 
-        return LibraryDataframes(df_rbxml)
+        return LibraryDataFrames(df_rbxml, None)
     
     def check_export_file(self):
         if not self.config['export_file']:
@@ -315,22 +326,18 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             dfs = self.load_libraries(
                 lib, query=ui.decargs(args), rkb_required=opts.missing
             )
+            df_beets = dfs.beets
 
             if opts.missing:
-                _, _, only_beets = crop(
-                    df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets,
-                )
+                _, _, only_beets = crop(dfs)
 
                 if only_beets.empty:
                     print("nothing to do: no tracks are missing from rekordbox")
                     return
 
-                dfs.df_beets.set_index('path', inplace=True)
-                export(xml_path, lib, dfs.df_beets.loc[only_beets]['id'])
-                return
+                df_beets = dfs.beets.loc[only_beets]
             
-            dfs.df_beets.set_index('path', inplace=True)
-            export(xml_path, lib, dfs.df_beets['id'])
+            export_df(xml_path, get_export_df(dfs.beets))
 
         rkb_export_cmd.func = rkb_export_func
 
@@ -354,19 +361,19 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
             dfs = self.load_libraries(lib)
 
-            df_common, only_rbxml, only_beets = crop(
-                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
-            )
-
             if opts.pickle:
                 print("Writing dataframes to {}".format(opts.pickle))
-                dfs.df_beets.to_pickle(opts.pickle / Path('df_beets.pkl'))
-                dfs.df_rbxml.to_pickle(opts.pickle / Path('df_rbxml.pkl'))
+                dfs.beets.to_pickle(opts.pickle / Path('beets.pkl'))
+                dfs.rbxml.to_pickle(opts.pickle / Path('rbxml.pkl'))
+
+            df_common, only_rbxml, only_beets = crop(dfs)
+
+            if opts.pickle:
                 df_common.to_pickle(opts.pickle / Path('df_common.pkl'))
 
             print("{:>6d} tracks in rekordbox library (in beets directory)".format(
                 df_common.index.size + only_rbxml.size))
-            print("{:>6d} tracks in beets library".format(dfs.df_beets.index.size))
+            print("{:>6d} tracks in beets library".format(dfs.beets.index.size))
             print("{:>6d} shared tracks in both".format(df_common.index.size))
 
             if not only_rbxml.empty:
@@ -393,16 +400,14 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             self.config.set_args(opts)
             dfs = self.load_libraries(lib, query=ui.decargs(args))
 
-            df_common, _, _ = crop(
-                df_rbxml=dfs.df_rbxml, df_beets=dfs.df_beets
-            )
+            df_common, _, _ = crop(dfs)
             
             df_changed_ratings = df_common[
-                (df_common['rating'] != df_common['Rating'])
+                (df_common['rkb-Rating'] != df_common['Rating'])
                 | (df_common['rkb-TrackID'] != df_common['TrackID'])
                 | (df_common['rkb-DateAdded'] != df_common['DateAdded'])
                 | (df_common['rkb-PlayCount'] != df_common['PlayCount'])
-                | (df_common['rkb-Remixer'] != df_common['Remixer'])
+                | (df_common['remixer'] != df_common['Remixer'])
                 | (df_common['rkb-Mix'] != df_common['Mix'])
             ].set_index('id')
 
@@ -412,14 +417,15 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
             print("Updating {} tracks...".format(df_changed_ratings.index.size))
             with tqdm(total=df_changed_ratings.index.size, unit='tracks') as pbar:
+                # TODO change to itertuples
                 for id, row in df_changed_ratings.iterrows():
                     item = lib.get_item(id)
                     item.update({
-                        'rating': row['Rating'],
+                        'rkb-Rating': row['Rating'],
                         'rkb-TrackID': row['TrackID'],
                         'rkb-DateAdded': row['DateAdded'],
                         'rkb-PlayCount': row['PlayCount'],
-                        'rkb-Remixer': row['Remixer'],
+                        'remixer': row['Remixer'],
                         'rkb-Mix': row['Mix'],
                     })
                     # TODO there has to be a more direct way
