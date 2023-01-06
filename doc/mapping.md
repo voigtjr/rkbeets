@@ -30,3 +30,7 @@
 | `Year` | `int32` | `year` | `int32` |
 | | | `id` | `int32` | beets-internal |
 
+## References
+
+- [Pioneer xml format list](https://cdn.rekordbox.com/files/20200410160904/xml_format_list.pdf)
+- [Pyrekordbox documentation](https://pyrekordbox.readthedocs.io/en/latest/formats/xml.html)
