@@ -6,13 +6,13 @@ Python 3.10. Be careful - **use a copy of your database** - there are no confirm
 
 ## Quick tour
 
-_Tested only on recent macos._
+_Tested only on recent macos, case-insensitive fs with beets library on a vfat drive._
 
 ### Data input and output
 
-* The plugin will export data for import into rekordbox using the option `export-file`.
-* Some commands use data from rekordbox, provided to beets via the option `rekordbox-file`.
-* Setting the configuration options cleans up the command line, e.g.:
+* The plugin will export data for import into rekordbox using the option `--export-file`.
+* Some commands use data from rekordbox, provided to beets via the option `--rekordbox-file`.
+* Setting these in the configuration file cleans up the command line:
 
 `.config/beets/config.yaml`:
 ```yaml 
@@ -56,18 +56,25 @@ The `rkb-sync` command lets you pull metadata from rekordbox into beets.
 # rekordbox metadata -written-to-> beets library
 beet rkb-sync
 
+# dump to console instead of updating
+beet rkb-sync --dry-run
+
 # only consider shared tracks that satisfy a query
 beet rkb-sync artist:radiohead
 ```
 
-Currently implemented for these fields:
+Currently implemented for these rekordbox fields: 
 
-* `Rating`
-* `TrackID`
+* `AverageBpm`
+* `Colour`
 * `DateAdded`
-* `PlayCount`
-* `Remixer`
+* `DateModified`
+* `LastPlayed`
 * `Mix`
+* `PlayCount`
+* `Rating`
+* `Tonality`
+* `TrackID`: This is rekordbox internal and isn't exported but we save it anyway.
 
 ### Importing from rekordbox to beets
 

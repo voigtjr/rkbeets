@@ -4,11 +4,13 @@
  
 ## Primary key: `Location`
 
-* `Location`: Note that, thanks to the filesystem's case insensitivity, some of these do not match what's actually used on disk (same with beets data) so we force it to lower case.
+* `Location`: Forced to lowercase because the filesystem I'm testing this on is in lowercase.
+  * Rekordbox also strips the root `/` which we add back in.
+  * Making this correctly portable will be some amount of work.
 
 ## beets source of truth
 
-These should normally be controlled by beets and written to rekordbox
+These should be controlled by beets and written to rekordbox
 
  * `Name`
  * `Artist`
@@ -26,35 +28,21 @@ These should normally be controlled by beets and written to rekordbox
 
 New fields to sync by default into beets from rekordbox.
 
-Implemented: 
-
- * `TrackID`: Rekordbox internal track identifier number, note that I think this is not viewable anymore in the GUI and is back-end only
- * `Rating`: default 0
- * `DateAdded`: Date track added to rekordbox, useful in many contexts to preserve
- * `PlayCount`
- * `Remixer`
- * `Mix`: Track metadata that doesn't have a key in beets
- 
-TODO:
-
+ * `AverageBpm`
  * `Colour`: User-set color identifiers
+ * `DateAdded`: Date track added to rekordbox, useful to preserve
+ * `DateModified`
+ * `LastPlayed`
+ * `Mix`: Track metadata that doesn't have a key in beets
+ * `PlayCount`: How many times it has been played in Rekordbox
+ * `Rating`: Default 0 for no rating
+ * `Tonality`: Key encoding, computed from analysis
+ * `TrackID`: Rekordbox internal track identifier number, note that I think this is not viewable anymore in the GUI and is back-end only
 
 # Rekordbox analyzed metadata
 
-These should (?) be computed when rekordbox does an analysis job and therefore rekordbox should be the source of truth.
-
- * `Tonality`: Key encoding, computed from analysis
- * `AverageBpm`
-
-## Properties
-
- * `LastPlayed`: seems to be all `<NA>` in my data, ignoring for now...
-
-These should be computed from the data. 
-
- * `Kind`: `['MP3 File', 'M4A File', 'WAV File']`
+ * `Kind`: `['MP3 File', 'M4A File', 'WAV File']` unclear if there are more
  * `Size`
  * `TotalTime`
- * `DateModified`: Unclear if this is filesystem or rekordbox or what, "Date of last modification"
  * `BitRate`
  * `SampleRate`
