@@ -28,11 +28,11 @@
 from collections import defaultdict
 import copy
 from dataclasses import dataclass
-import glob
+from functools import reduce
 from importlib import resources
 import logging
+import operator
 from pathlib import Path
-import re
 
 from beets import config
 from beets import plugins
@@ -68,6 +68,9 @@ class DimensionsDB():
     def __init__(self):
         with resources.open_text(beetsplug, 'rkbeets-fields.csv') as f:
             self.df = pandas.read_csv(f)
+    
+    def to_pickle(self, dir):
+        self.df.to_pickle(dir / Path('ddb.pkl'))
     
     def num_rkb_cols(self):
         cols = self.df[['rkb_field', 'rkb_type']].dropna()
@@ -119,6 +122,10 @@ class DimensionsDB():
             (row.rkb_field, get_transform(row.convert_to_rkb))
             for row in self.df[['rkb_field', 'convert_to_rkb']].dropna().itertuples(index=False)
         )
+    
+    def get_sync_pairs(self):
+        df = self.df[self.df['beets_field'].str.startswith('rkb_').fillna(False)]
+        return df[['beets_field', 'rkb_field']].itertuples(index=False)
 
 class Libraries():
     ddb: DimensionsDB
@@ -193,14 +200,15 @@ class Libraries():
 
     def to_pickle(self, dir):
         self.df_beets.to_pickle(dir / Path('df_beets.pkl'))
+        self.ddb.to_pickle(dir)
         if self.df_rbxml is not None:
             self.df_rbxml.to_pickle(dir / Path('df_rbxml.pkl'))
         if self.df_common is not None:
             self.df_common.to_pickle(dir / Path('df_common.pkl'))
         if self.only_beets is not None:
-            self.only_beets.to_pickle(dir / Path('only_beets.pkl'))
+            pandas.Series(self.only_beets).to_pickle(dir / Path('only_beets.pkl'))
         if self.only_rbxml is not None:
-            self.only_rbxml.to_pickle(dir / Path('only_rbxml.pkl'))
+            pandas.Series(self.only_rbxml).to_pickle(dir / Path('only_rbxml.pkl'))
 
     def crop(self, music_directory=None):
         df_r = self.df_rbxml
@@ -261,15 +269,36 @@ class Libraries():
         print("Writing {}...".format(xml_path))
         outxml.save(path=xml_path)
 
+    def get_sync_changed(self):
+        def ne(l, r):
+            return l.fillna(l.dtype.type()) != r
+
+        compares = (
+            ne(self.df_common[cols.beets_field], self.df_common[cols.rkb_field])
+            for cols in self.ddb.get_sync_pairs()
+        )
+        mask = reduce(operator.or_, compares)
+        df_changed = self.df_common[mask]
+        df_changed = df_changed.set_index('id')
+
+        def transform_column(cols):
+            default = self.df_common[cols.beets_field].dtype.type()
+            return df_changed[cols.rkb_field].fillna(default)
+
+        return pandas.DataFrame(data={
+            cols.beets_field: transform_column(cols) 
+            for cols in self.ddb.get_sync_pairs()
+        }) 
+
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
     # Flexible attribute typing
     item_types = {
-        'rkb-Rating': types.INTEGER,
-        'rkb-TrackID': types.INTEGER,
-        'rkb-DateAdded': types.STRING,
-        'rkb-PlayCount': types.INTEGER,
-        'rkb-Mix': types.STRING,
+        'rkb_Rating': types.INTEGER,
+        'rkb_TrackID': types.INTEGER,
+        'rkb_DateAdded': types.STRING,
+        'rkb_PlayCount': types.INTEGER,
+        'rkb_Mix': types.STRING,
     }
 
     libs: Libraries = None
@@ -393,6 +422,10 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             '-r', '--rekordbox-file', dest='rekordbox_file',
             help="rekordbox xml library"
         )
+        rkb_sync_cmd.parser.add_option(
+            '-n', '--dry-run', dest='dry_run', action='store_true', default=False,
+            help="print the changes instead of committing them"
+        )
 
         def rkb_sync_func(lib, opts, args):
             self.config.set_args(opts)
@@ -404,36 +437,26 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
             self.libs = self.libs.crop(config['directory'].get())
 
-            # TODO use a new column indicating sync
-            df_changed_ratings = self.libs.df_common[
-                (self.libs.df_common['rkb-Rating'] != self.libs.df_common['Rating'])
-                | (self.libs.df_common['rkb-TrackID'] != self.libs.df_common['TrackID'])
-                | (self.libs.df_common['rkb-DateAdded'] != self.libs.df_common['DateAdded'])
-                | (self.libs.df_common['rkb-PlayCount'] != self.libs.df_common['PlayCount'])
-                | (self.libs.df_common['remixer'] != self.libs.df_common['Remixer'])
-                | (self.libs.df_common['rkb-Mix'] != self.libs.df_common['Mix'])
-            ].set_index('id')
+            df_sync_changed = self.libs.get_sync_changed()
 
-            if df_changed_ratings.empty:
+            if df_sync_changed.empty:
                 print("nothing to update")
                 return
 
-            print("Updating {} tracks...".format(df_changed_ratings.index.size))
-            with tqdm(total=df_changed_ratings.index.size, unit='tracks') as pbar:
-                # TODO change to itertuples
-                for id, row in df_changed_ratings.iterrows():
+            print("Updating {} tracks...".format(df_sync_changed.index.size))
+            with tqdm(total=df_sync_changed.index.size, unit='tracks') as pbar:
+                for row in df_sync_changed.itertuples():
+                    data = row._asdict()
+                    id = data.pop('Index')
                     item = lib.get_item(id)
-                    item.update({
-                        'rkb-Rating': row['Rating'],
-                        'rkb-TrackID': row['TrackID'],
-                        'rkb-DateAdded': row['DateAdded'],
-                        'rkb-PlayCount': row['PlayCount'],
-                        'remixer': row['Remixer'],
-                        'rkb-Mix': row['Mix'],
-                    })
-                    # TODO there has to be a more direct way
-                    # item.try_sync(False, False)
-                    pbar.update()
+                    item.update(data)
+
+                    if opts.dry_run:
+                        print("{} --> {}".format(item.get('path').decode('utf-8'), data))
+                    else:
+                        # TODO is there a clearer way other than try_sync?
+                        item.try_sync(False, False)
+                        pbar.update()
 
         rkb_sync_cmd.func = rkb_sync_func
 
