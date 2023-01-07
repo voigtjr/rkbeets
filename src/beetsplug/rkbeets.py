@@ -166,7 +166,6 @@ class Libraries():
         # Prepend a slash to the paths, Rekordbox removes this
         df['Location'] = '/' + df['Location']
 
-        # TODO report on normalization errors? definitely on inconsistent spaces
         index = df['Location'].str.normalize('NFD').str.lower()
         return df.set_index(index)
 
@@ -299,8 +298,6 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         return xml_path
 
     def commands(self):
-        # TODO address self.libs. direct access
-
         rkb_export_cmd = ui.Subcommand(
             'rkb-export',
             help="export beets library for import into rekordbox"
@@ -323,7 +320,6 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
         def rkb_export_func(lib, opts, args):
             self.config.set_args(opts)
-            # TODO use stdout?
             export_path = self.check_export_file()
 
             self.libs = Libraries(
