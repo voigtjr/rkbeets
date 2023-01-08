@@ -25,13 +25,13 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from collections import namedtuple, abc
+from collections import namedtuple
 from functools import cached_property, reduce
 from importlib import resources
 import logging
 import operator
 from pathlib import Path
-from typing import Any, Callable, Final, Iterable, TextIO, Tuple
+from typing import Any, Callable, Iterable
 
 from beets import config
 from beets import plugins
@@ -60,19 +60,16 @@ class DimensionsDB():
         
     Parameters
     ----------
-    csv_buffer: TextIO, optional
-        Override the default and read dimensions CSV from this buffer
-        instead
+    csv: Path, optional
+        Use this csv file instead of the default.
     """
 
     _df: pandas.DataFrame
 
-    def __init__(self, csv_buffer: TextIO | None = None):
-        if csv_buffer:
-            self._df = pandas.read_csv(csv_buffer)
-        else:
-            with resources.open_text(beetsplug, 'rkbeets-fields.csv') as f:
-                self._df = pandas.read_csv(f)
+    def __init__(self, csv_path: Path | None = None):
+        path = csv_path if csv_path is not None else resources.path(
+            beetsplug, 'rkbeets-fields.csv')
+        self._df = pandas.read_csv(path)
     
     def to_pickle(self, dir: Path) -> None:
         """
@@ -134,7 +131,7 @@ class DimensionsDB():
         """
     
         no_export = self._df['no_export'].fillna(False)
-        drop_fields = self._df[no_export]['beets_field'].tolist()
+        drop_fields = self._df[no_export]['beets_field'].dropna().tolist()
 
         def format_to_kind(format: str) -> str:
             mapping = {
@@ -172,7 +169,7 @@ class DimensionsDB():
             namedtuples with `beets` and corresponding `rkb` fields.
 
         """
-        df = self._df[self._df['beets_field'].str.startswith('rkb_').fillna(False)]
+        df = self._df[self._df['sync'].fillna(False)]
         df = df[['beets_field', 'rkb_field']].rename(columns={
             'beets_field': 'beets',
             'rkb_field': 'rkb',
