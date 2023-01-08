@@ -53,67 +53,131 @@ try:
 finally:
     logging.disable(previous_level)
 
-def format_to_kind(value: str) -> str:
-    """Convert beets 'format' field to rekordbox 'Kind' field."""
-    if value == 'AAC':
-        return 'M4A File'
-    if value == 'MP3':
-        return 'MP3 File'
-    if value == 'WAV':
-        return 'WAV File'
-    return value
-
 class DimensionsDB():
-    CSV_NAME: Final[str] = 'rkbeets-fields.csv'
-    df: pandas.DataFrame
+    """
+    Manages metadata about beets and rekordbox fields and their relationships to
+    one another.
+        
+    Parameters
+    ----------
+    csv_buffer: TextIO, optional
+        Override the default and read dimensions CSV from this buffer
+        instead
+    """
 
-    def __init__(self, buffer: TextIO | None = None):
-        if buffer:
-            self.df = pandas.read_csv(buffer)
+    _df: pandas.DataFrame
+
+    def __init__(self, csv_buffer: TextIO | None = None):
+        if csv_buffer:
+            self._df = pandas.read_csv(csv_buffer)
         else:
-            with resources.open_text(beetsplug, self.CSV_NAME) as f:
-                self.df = pandas.read_csv(f)
+            with resources.open_text(beetsplug, 'rkbeets-fields.csv') as f:
+                self._df = pandas.read_csv(f)
     
     def to_pickle(self, dir: Path) -> None:
-        self.df.to_pickle(dir / Path('ddb.pkl'))
+        """
+        Pickle the DataFrame to `ddb.pkl` in the given directory.
+        
+        Parameters
+        ----------
+        dir: Path
+            Directory to write 'ddb.pkl'
+        """
+
+        self._df.to_pickle(dir / Path('ddb.pkl'))
     
-    def num_rkb_cols(self) -> int:
-        cols = self.df[['rkb_field', 'rkb_type']].dropna()
-        return cols.index.size
-
-    def iterrkbcols(self) -> abc.Iterator[namedtuple]:
-        cols = self.df[['rkb_field', 'rkb_type']].dropna()
-        return cols.itertuples(index=False)
-
     def num_beets_cols(self) -> int:
-        cols = self.df[['beets_field', 'beets_type']].dropna()
-        return cols.index.size
+        """The number of beets fields."""
 
-    def iterbeetscols(self) -> abc.Iterator[namedtuple]:
-        cols = self.df[['beets_field', 'beets_type']].dropna()
-        return cols.itertuples(index=False)
-
-    def get_export_conversion_info(self) -> tuple[pandas.Series, Iterable[namedtuple]]:
-        no_export = self.df['no_export'].fillna(False)
-        df_export = self.df[~no_export][['beets_field', 'rkb_field']].dropna()
-        drop = self.df[no_export]['beets_field']
-        return drop, df_export.itertuples(index=False)
-
-    def get_transform_functions(self) -> Iterable[Tuple[str, Callable]]:
-        def get_transform(v):
-            # Could be more clever here idk. There will be more transforms...
-            if v == 'format_to_kind':
-                return format_to_kind
-            raise RuntimeError('unknown transform function {}'.format(v))
-
-        return (
-            (row.rkb_field, get_transform(row.convert_to_rkb))
-            for row in self.df[['rkb_field', 'convert_to_rkb']].dropna().itertuples(index=False)
-        )
+        return self._df['beets_field'].dropna().size
     
-    def get_sync_pairs(self) -> tuple[pandas.Series]:
-        df = self.df[self.df['beets_field'].str.startswith('rkb_').fillna(False)]
-        return df[['beets_field', 'rkb_field']].itertuples(index=False)
+    def get_beets_cols(self) -> Iterable[tuple[str, str]]:
+        """Returns a namedtuple of beets `field`s and their corresponding `dtype`s."""
+
+        df = self._df[['beets_field', 'beets_type']].dropna()
+        mapping = {
+            'beets_field': 'field',
+            'beets_type': 'dtype',
+        }
+        return df.rename(columns=mapping).itertuples(name='FieldInfo', index=False)
+
+    def num_rkb_cols(self) -> int:
+        """The number of rekordbox fields."""
+
+        return self._df['rkb_field'].dropna().size
+    
+    def get_rkb_cols(self) -> Iterable[tuple[str, str]]:
+        """Returns a namedtuple of rekordbox `field`s and their corresponding `dtype`s."""
+
+        df = self._df[['rkb_field', 'rkb_type']].dropna()
+        mapping = {
+            'rkb_field': 'field',
+            'rkb_type': 'dtype',
+        }
+        return df.rename(columns=mapping).itertuples(name='FieldInfo', index=False)
+
+    def get_export_conversion_info(
+        self
+    ) -> tuple[list[str], tuple[str, str, Callable[[Any], Any] | None]]:
+        """
+        Get the information required to transform beets metadata to rekordbox
+        metadata to export from beets to import into rekordbox.
+
+        Returns
+        -------
+        drop_fields : list
+            List of beets fields to drop as they are not exported to rekordbox
+        export_fields: iterator
+            A named tuple `ExportFields` with the `beets` field to rename to
+            `rkb` field name, and an optional function `func` to use to
+            transform the values.
+        """
+    
+        no_export = self._df['no_export'].fillna(False)
+        drop_fields = self._df[no_export]['beets_field'].tolist()
+
+        def format_to_kind(format: str) -> str:
+            mapping = {
+                'AAC': 'M4A File',
+                'MP3': 'MP3 File',
+                'WAV': 'WAV File',
+                # Unclear if there are more types...
+            }
+            kind = mapping.get(format)
+            return kind if kind is not None else format
+
+        xform = {
+            'format_to_kind': format_to_kind
+        }
+
+        df_export = self._df[~no_export][
+            ['beets_field', 'rkb_field', 'convert_to_rkb']
+            ].dropna(subset=['beets_field', 'rkb_field'])
+
+        ef = namedtuple("ExportFields", ['beets', 'rkb', 'func'])
+        export_fields = (
+            ef._make([row.beets_field, row.rkb_field, xform.get(row.convert_to_rkb)])
+            for row in df_export.itertuples(index=False))
+
+        ei = namedtuple("ExportInfo", ['drop_fields', 'export_fields'])
+        return ei._make([drop_fields, export_fields])    
+
+    def get_sync_pairs(self) -> Iterable[tuple[str, str]]:
+        """
+        Get corresponding beets and rekordbox fields.
+
+        Returns
+        -------
+        FieldPairs : iterator
+            namedtuples with `beets` and corresponding `rkb` fields.
+
+        """
+        df = self._df[self._df['beets_field'].str.startswith('rkb_').fillna(False)]
+        df = df[['beets_field', 'rkb_field']].rename(columns={
+            'beets_field': 'beets',
+            'rkb_field': 'rkb',
+        })
+        return df.itertuples(name='FieldPairs', index=False)
 
 
 ComputedLibraries = namedtuple('ComputedLibraries', ['df_common', 'only_beets', 'only_rbxml'])
@@ -137,15 +201,15 @@ class Libraries():
         with tqdm(total=self.ddb.num_beets_cols(), unit='columns') as pbar:
             def get_series(cols):
                 series = pandas.Series(
-                    data=[i.get(cols.beets_field) for i in self.items],
-                    dtype=cols.beets_type
+                    data=[i.get(cols.field) for i in self.items],
+                    dtype=cols.dtype
                 )
                 pbar.update()
                 return series
 
             series_data = {
-                cols.beets_field: get_series(cols)
-                for cols in self.ddb.iterbeetscols()
+                cols.field: get_series(cols)
+                for cols in self.ddb.get_beets_cols()
             }
 
         df = pandas.DataFrame(data=series_data)
@@ -161,15 +225,15 @@ class Libraries():
         with tqdm(total=self.ddb.num_rkb_cols(), unit='columns') as pbar:
             def get_series(cols):
                 series = pandas.Series(
-                    data=[t[cols.rkb_field] for t in tracks],
-                    dtype=cols.rkb_type
+                    data=[t[cols.field] for t in tracks],
+                    dtype=cols.dtype
                 )
                 pbar.update()
                 return series
 
             series_data = {
-                cols.rkb_field: get_series(cols)
-                for cols in self.ddb.iterrkbcols()
+                cols.field: get_series(cols)
+                for cols in self.ddb.get_rkb_cols()
             }
 
         df = pandas.DataFrame(data=series_data)
@@ -206,10 +270,11 @@ class Libraries():
     def get_export_df(self, index: pandas.Index | None = None) -> pandas.DataFrame:
         df_beets = self.df_beets if index is None else self.df_beets[index]
 
-        drop, export_tuples = self.ddb.get_export_conversion_info()
-        df = df_beets.drop(columns=drop).rename(columns={
-            row.beets_field: row.rkb_field
-            for row in export_tuples
+        export_info = self.ddb.get_export_conversion_info()
+        df = df_beets.drop(columns=export_info.drop_fields)
+        df = df.rename(columns={
+            row.beets: row.rkb
+            for row in export_info.export_fields
         }, errors='raise')
 
         # Use the type's default value to fill the nulls
@@ -219,8 +284,9 @@ class Libraries():
             df[field] = df[field].fillna(value=value.type())
 
         # Required conversions
-        for field, t in self.ddb.get_transform_functions():
-            df[field] = df[field].transform(t)
+        for row in export_info.export_fields:
+            if row.func is not None:
+                df[row.rkb] = df[row.rkb].transform(row.func)
 
         return df
 
@@ -229,7 +295,7 @@ class Libraries():
             return l.fillna(l.dtype.type()) != r
 
         compares = (
-            ne(df_common[cols.beets_field], df_common[cols.rkb_field])
+            ne(df_common[cols.beets], df_common[cols.rkb])
             for cols in self.ddb.get_sync_pairs()
         )
         mask = reduce(operator.or_, compares)
@@ -237,11 +303,11 @@ class Libraries():
         df_changed = df_changed.set_index('id')
 
         def transform_column(cols):
-            default = df_common[cols.beets_field].dtype.type()
-            return df_changed[cols.rkb_field].fillna(default)
+            default = df_common[cols.beets].dtype.type()
+            return df_changed[cols.rkb].fillna(default)
 
         return pandas.DataFrame(data={
-            cols.beets_field: transform_column(cols) 
+            cols.beets: transform_column(cols) 
             for cols in self.ddb.get_sync_pairs()
         }) 
 
