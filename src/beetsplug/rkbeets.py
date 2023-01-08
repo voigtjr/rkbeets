@@ -70,6 +70,9 @@ class DimensionsDB():
         path = csv_path if csv_path is not None else resources.path(
             beetsplug, 'rkbeets-fields.csv')
         self._df = pandas.read_csv(path)
+        if self._df.index.has_duplicates:
+            # TODO test this works
+            raise RuntimeError("rkbeets-fields contains duplicate columns between library types")
     
     def to_pickle(self, dir: Path) -> None:
         """
@@ -177,28 +180,51 @@ class DimensionsDB():
         return df.itertuples(name='FieldPairs', index=False)
 
 
-ComputedLibraries = namedtuple('ComputedLibraries', ['df_common', 'only_beets', 'only_rbxml'])
+ComputedLibraries: tuple[
+    pandas.DataFrame, pandas.Index, pandas.Index
+] = namedtuple('ComputedLibraries', ['df_common', 'only_beets', 'only_rbxml'])
 
 class Libraries():
-    ddb: DimensionsDB
-    items: db.Results
-    xml_path = Path
+    """
+    Manages beets and rekordbox libraries and the operations between them
+    delegating a ton of actual work to dataframes.
+
+    Loads the libraries on demand, so, if something isn't configured correctly,
+    it won't error out until it is used.
+    
+    Parameters
+    ----------
+    lib: Library
+        Beets library.
+    query: beets command line query, optional
+        The query from the command line arguments, usually from `ui.decargs`.
+    xml_path: Path
+        Path to the exported rekordbox xml library that will be read for various operations.
+    ddb_csv_path: Path
+        Override data for the dimensions db, for testing.
+    """
+
+    _ddb: DimensionsDB
+    _items: db.Results
+    _xml_path = Path
     
     def __init__(
-        self, lib: library.Library, query: str | list | tuple,
-        xml_path: Path = None
+        self, lib: library.Library,
+        query: str | list | tuple,
+        xml_path: Path = None,
+        ddb_csv_path: Path = None,
     ):
-        self.ddb = DimensionsDB()
-        self.items = lib.items(query)
-        self.xml_path = xml_path
+        self._ddb = DimensionsDB(csv_path=ddb_csv_path)
+        self._items = lib.items(query)
+        self._xml_path = xml_path
 
     @cached_property
-    def df_beets(self) -> pandas.DataFrame:
+    def _df_beets(self) -> pandas.DataFrame:
         print("Loading beets library metadata...")
-        with tqdm(total=self.ddb.num_beets_cols(), unit='columns') as pbar:
+        with tqdm(total=self._ddb.num_beets_cols(), unit='columns') as pbar:
             def get_series(cols):
                 series = pandas.Series(
-                    data=[i.get(cols.field) for i in self.items],
+                    data=[i.get(cols.field) for i in self._items],
                     dtype=cols.dtype
                 )
                 pbar.update()
@@ -206,20 +232,27 @@ class Libraries():
 
             series_data = {
                 cols.field: get_series(cols)
-                for cols in self.ddb.get_beets_cols()
+                for cols in self._ddb.get_beets_cols()
             }
 
         df = pandas.DataFrame(data=series_data)
         index = df['path'].str.decode('utf-8').str.normalize('NFD').str.lower()
         return df.set_index(index)
+
+    def beets_track_count(self) -> int:
+        """
+        Returns the number of beets track loaded, subject to the query if any.
+        """
+
+        return self._df_beets.index.size
     
     @cached_property
-    def df_rbxml(self) -> pandas.DataFrame:
-        xml = pxml.RekordboxXml(self.xml_path)
+    def _df_rbxml(self) -> pandas.DataFrame:
+        xml = pxml.RekordboxXml(self._xml_path)
         tracks = xml.get_tracks()
 
         print("Loading rekordbox xml...")
-        with tqdm(total=self.ddb.num_rkb_cols(), unit='columns') as pbar:
+        with tqdm(total=self._ddb.num_rkb_cols(), unit='columns') as pbar:
             def get_series(cols):
                 series = pandas.Series(
                     data=[t[cols.field] for t in tracks],
@@ -230,7 +263,7 @@ class Libraries():
 
             series_data = {
                 cols.field: get_series(cols)
-                for cols in self.ddb.get_rkb_cols()
+                for cols in self._ddb.get_rkb_cols()
             }
 
         df = pandas.DataFrame(data=series_data)
@@ -242,32 +275,82 @@ class Libraries():
         return df.set_index(index)
 
     def to_pickle(self, dir: Path) -> None:
-        self.df_beets.to_pickle(dir / Path('df_beets.pkl'))
-        self.ddb.to_pickle(dir)
-        if self.df_rbxml is not None:
-            self.df_rbxml.to_pickle(dir / Path('df_rbxml.pkl'))
+        """
+        Pickle the beets and rekordbox `DataFrame`s to `df_beets.pkl` and
+        `df_rbxml.pkl` in the given directory. Call `to_pickle` on ddb.
+        
+        Parameters
+        ----------
+        dir: Path
+            Directory to write pickle files.
+        """
+
+        self._df_beets.to_pickle(dir / Path('df_beets.pkl'))
+        self._ddb.to_pickle(dir)
+        if self._df_rbxml is not None:
+            self._df_rbxml.to_pickle(dir / Path('df_rbxml.pkl'))
 
     def crop(self, music_directory: str | None = None) -> ComputedLibraries:
-        df_r = self.df_rbxml
+        """
+        Compare the two libraries using only filesystem paths. If a
+        `music_directory` is given, only consider files to be missing from the
+        beets library if they are present in that tree. Join all the
+        fields and return that, as well as lists of which files are only in
+        each.
+
+        Parameters
+        ----------
+        music_directory: str, optional
+            The configured music directory for beets files, usually straight
+            from config.
+        
+        Returns
+        -------
+        df_common: pandas.DataFrame
+            All files common to both libraries with all fields in both
+            repositories.
+        only_beets: pandas.Index
+            Paths only in beets library.
+        only_rbxml: pandas.Index
+            Paths only in rekordbox library.
+        """
+
+        df_r = self._df_rbxml
         if music_directory:
             # Filter tracks outside of music directory
-            i = self.df_rbxml.index.str.startswith(music_directory.lower())
-            df_r = self.df_rbxml[i]
+            i = self._df_rbxml.index.str.startswith(music_directory.lower())
+            df_r = self._df_rbxml[i]
 
-        only_rbxml = df_r.index.difference(self.df_beets.index)
-        only_beets = self.df_beets.index.difference(df_r.index)
+        only_rbxml = df_r.index.difference(self._df_beets.index)
+        only_beets = self._df_beets.index.difference(df_r.index)
 
-        intersection = df_r.index.intersection(self.df_beets.index)
-        df_common = self.df_beets.loc[intersection].join(
+        intersection = df_r.index.intersection(self._df_beets.index)
+        df_common = self._df_beets.loc[intersection].join(
             df_r.loc[intersection]
         )
 
         return ComputedLibraries(df_common=df_common, only_beets=only_beets, only_rbxml=only_rbxml)
 
     def get_export_df(self, index: pandas.Index | None = None) -> pandas.DataFrame:
-        df_beets = self.df_beets if index is None else self.df_beets[index]
+        """
+        Get the dataframe of tracks to export to rekordbox. Renames and converts
+        field values using the dimensions db.
 
-        export_info = self.ddb.get_export_conversion_info()
+        Parameters
+        ----------
+        index: pandas.Index, optional
+            If present, filter using this index of file paths instead of
+            considering the entire library.
+        
+        Returns
+        -------
+        df: pandas.DataFrame
+            The tracks indexed by paths including all field columns with
+            converted values ready for pyrekordbox xml api.
+        """
+        df_beets = self._df_beets if index is None else self._df_beets[index]
+
+        export_info = self._ddb.get_export_conversion_info()
         df = df_beets.drop(columns=export_info.drop_fields)
         df = df.rename(columns={
             row.beets: row.rkb
@@ -288,12 +371,27 @@ class Libraries():
         return df
 
     def get_sync_changed(self, df_common: pandas.DataFrame) -> pandas.DataFrame:
+        """
+        Compare the columns that are marked to sync and include them in the
+        returned data if they are changed.
+
+        Parameters
+        ----------
+        df_common: pandas.DataFrame
+            Output from crop, potentially filtered.
+        
+        Returns
+        -------
+        df_changed: pandas.DataFrame
+            The changed items to sync, indexed by beets `id` field, with NAs
+            filled with default values.
+        """
         def ne(l, r):
             return l.fillna(l.dtype.type()) != r
 
         compares = (
             ne(df_common[cols.beets], df_common[cols.rkb])
-            for cols in self.ddb.get_sync_pairs()
+            for cols in self._ddb.get_sync_pairs()
         )
         mask = reduce(operator.or_, compares)
         df_changed = df_common[mask]
@@ -305,11 +403,21 @@ class Libraries():
 
         return pandas.DataFrame(data={
             cols.beets: transform_column(cols) 
-            for cols in self.ddb.get_sync_pairs()
+            for cols in self._ddb.get_sync_pairs()
         }) 
 
 
-def export_df(xml_path, df: pandas.DataFrame) -> None:
+def export_df(xml_path: Path, df: pandas.DataFrame) -> None:
+    """
+    Convert a dataframe filled with rekordbox metadata into xml.
+
+    Parameters
+    ----------
+    xml_path: Path
+        Output xml file path.
+    df: pandas.DataFrame
+        Input data.    
+    """
     outxml = pxml.RekordboxXml(
         name='rekordbox', version='5.4.3', company='Pioneer DJ'
     )
@@ -335,6 +443,19 @@ def export_df(xml_path, df: pandas.DataFrame) -> None:
 
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
+    """
+    Integrate beets and rekordbox using rekordbox exported xml library data.
+
+    Configuration
+    -------------
+    rkbeets.export_file: Path
+        The plugin will export data for import into rekordbox using an xml file
+        written to this path.
+    rkbeets.rekordbox_file: Path
+        Some commands use data exported from rekordbox into an xml file at this
+        path.
+    """
+
     # beets plugin interface to declare flexible attr types
     item_types: dict[str, types.Type] = {
         'rkb_AverageBpm': types.FLOAT,
@@ -358,27 +479,14 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
         })
 
     def commands(self) -> list[Callable[[library.Library, Any, Any], Any]]:
-        rkb_export_cmd = ui.Subcommand(
-            'rkb-export',
-            help="export beets library for import into rekordbox"
-        )
-
-        rkb_export_cmd.parser.add_option(
-            '-e', '--export-file', dest='export_file',
-            help="target file for beets data exported for rekordbox"
-        )
-
-        rkb_export_cmd.parser.add_option(
-            '-r', '--rekordbox-file', dest='rekordbox_file',
-            help="rekordbox xml library"
-        )
-
-        rkb_export_cmd.parser.add_option(
-            '-m', '--missing', dest='missing', action='store_true', default=False,
-            help="only consider files not already in rekordbox library"
-        )
+        """
+        Returns a small set of commands, all prefixed with `rkb-`, for addition
+        to the beets cli.
+        """
 
         def rkb_export_func(lib: library.Library, opts, args):
+            """export beets library for import into rekordbox"""
+
             self.config.set_args(opts)
             export_path = self.config['export_file'].get()
 
@@ -401,24 +509,27 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
             export_df(export_path, df_export)
 
-        rkb_export_cmd.func = rkb_export_func
-
-        rkb_diff_cmd = ui.Subcommand(
-            'rkb-diff',
-            help='show information and differences between the rekordbox and beets libraries'
+        rkb_export_cmd = ui.Subcommand(
+            'rkb-export',
+            help=rkb_export_func.__doc__
         )
-
-        rkb_diff_cmd.parser.add_option(
+        rkb_export_cmd.func = rkb_export_func
+        rkb_export_cmd.parser.add_option(
+            '-e', '--export-file', dest='export_file',
+            help="target file for beets data exported for rekordbox"
+        )
+        rkb_export_cmd.parser.add_option(
             '-r', '--rekordbox-file', dest='rekordbox_file',
             help="rekordbox xml library"
         )
-
-        rkb_diff_cmd.parser.add_option(
-            '--pickle',
-            help="export dataframes to given directory"
+        rkb_export_cmd.parser.add_option(
+            '-m', '--missing', dest='missing', action='store_true', default=False,
+            help="only consider files not already in rekordbox library"
         )
 
         def rkb_diff_func(lib: library.Library, opts, args):
+            """show information and differences between the rekordbox and beets libraries"""
+
             self.config.set_args(opts)
 
             libs = Libraries(
@@ -434,7 +545,7 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
             print("{:>6d} tracks in rekordbox library (in beets directory)".format(
                 cl.df_common.index.size + cl.only_rbxml.size))
-            print("{:>6d} tracks in beets library".format(libs.df_beets.index.size))
+            print("{:>6d} tracks in beets library (subject to query if any)".format(libs.beets_track_count()))
             print("{:>6d} shared tracks in both".format(cl.df_common.index.size))
 
             if not cl.only_rbxml.empty:
@@ -447,21 +558,23 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
                 for path in cl.only_beets:
                     print("    ", path)
 
-        rkb_diff_cmd.func = rkb_diff_func
-
-        rkb_sync_cmd = ui.Subcommand(
-            'rkb-sync', help='sync metadata from rekordbox xml to beets database'
+        rkb_diff_cmd = ui.Subcommand(
+            'rkb-diff',
+            help=rkb_diff_func.__doc__
         )
-        rkb_sync_cmd.parser.add_option(
+        rkb_diff_cmd.func = rkb_diff_func
+        rkb_diff_cmd.parser.add_option(
             '-r', '--rekordbox-file', dest='rekordbox_file',
             help="rekordbox xml library"
         )
-        rkb_sync_cmd.parser.add_option(
-            '-n', '--dry-run', dest='dry_run', action='store_true', default=False,
-            help="print the changes instead of committing them"
+        rkb_diff_cmd.parser.add_option(
+            '--pickle',
+            help="export dataframes to given directory"
         )
 
         def rkb_sync_func(lib: library.Library, opts, args):
+            """sync metadata from rekordbox xml to beets database"""
+
             self.config.set_args(opts)
 
             libs = Libraries(
@@ -488,10 +601,21 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
                     if opts.dry_run:
                         print("{} --> {}".format(item.get('path').decode('utf-8'), data))
                     else:
-                        # TODO is there a clearer way other than try_sync?
                         item.try_sync(False, False)
                         pbar.update()
 
+        rkb_sync_cmd = ui.Subcommand(
+            'rkb-sync',
+            help=rkb_sync_func.__doc__
+        )
         rkb_sync_cmd.func = rkb_sync_func
+        rkb_sync_cmd.parser.add_option(
+            '-r', '--rekordbox-file', dest='rekordbox_file',
+            help="rekordbox xml library"
+        )
+        rkb_sync_cmd.parser.add_option(
+            '-n', '--dry-run', dest='dry_run', action='store_true', default=False,
+            help="print the changes instead of committing them"
+        )
 
         return [rkb_export_cmd, rkb_diff_cmd, rkb_sync_cmd]
