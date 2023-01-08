@@ -25,18 +25,19 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from collections import namedtuple
-import copy
+from collections import namedtuple, abc
 from functools import cached_property, reduce
 from importlib import resources
 import logging
 import operator
 from pathlib import Path
+from typing import Any, Callable, Final, Iterable, TextIO, Tuple
 
 from beets import config
 from beets import plugins
 from beets.dbcore import types
 from beets import ui
+from beets import library
 import pandas
 from tqdm import tqdm
 
@@ -52,7 +53,8 @@ try:
 finally:
     logging.disable(previous_level)
 
-def format_to_kind(value):
+def format_to_kind(value: str) -> str:
+    """Convert beets 'format' field to rekordbox 'Kind' field."""
     if value == 'AAC':
         return 'M4A File'
     if value == 'MP3':
@@ -62,38 +64,42 @@ def format_to_kind(value):
     return value
 
 class DimensionsDB():
+    CSV_NAME: Final[str] = 'rkbeets-fields.csv'
     df: pandas.DataFrame
 
-    def __init__(self):
-        with resources.open_text(beetsplug, 'rkbeets-fields.csv') as f:
-            self.df = pandas.read_csv(f)
+    def __init__(self, buffer: TextIO | None = None):
+        if buffer:
+            self.df = pandas.read_csv(buffer)
+        else:
+            with resources.open_text(beetsplug, self.CSV_NAME) as f:
+                self.df = pandas.read_csv(f)
     
-    def to_pickle(self, dir):
+    def to_pickle(self, dir: Path) -> None:
         self.df.to_pickle(dir / Path('ddb.pkl'))
     
-    def num_rkb_cols(self):
+    def num_rkb_cols(self) -> int:
         cols = self.df[['rkb_field', 'rkb_type']].dropna()
         return cols.index.size
 
-    def iterrkbcols(self):
+    def iterrkbcols(self) -> abc.Iterator[namedtuple]:
         cols = self.df[['rkb_field', 'rkb_type']].dropna()
         return cols.itertuples(index=False)
 
-    def num_beets_cols(self):
+    def num_beets_cols(self) -> int:
         cols = self.df[['beets_field', 'beets_type']].dropna()
         return cols.index.size
 
-    def iterbeetscols(self):
+    def iterbeetscols(self) -> abc.Iterator[namedtuple]:
         cols = self.df[['beets_field', 'beets_type']].dropna()
         return cols.itertuples(index=False)
 
-    def get_export_conversion_info(self):
+    def get_export_conversion_info(self) -> tuple[pandas.Series, Iterable[namedtuple]]:
         no_export = self.df['no_export'].fillna(False)
         df_export = self.df[~no_export][['beets_field', 'rkb_field']].dropna()
         drop = self.df[no_export]['beets_field']
         return drop, df_export.itertuples(index=False)
 
-    def get_transform_functions(self):
+    def get_transform_functions(self) -> Iterable[Tuple[str, Callable]]:
         def get_transform(v):
             # Could be more clever here idk. There will be more transforms...
             if v == 'format_to_kind':
@@ -105,7 +111,7 @@ class DimensionsDB():
             for row in self.df[['rkb_field', 'convert_to_rkb']].dropna().itertuples(index=False)
         )
     
-    def get_sync_pairs(self):
+    def get_sync_pairs(self) -> tuple[pandas.Series]:
         df = self.df[self.df['beets_field'].str.startswith('rkb_').fillna(False)]
         return df[['beets_field', 'rkb_field']].itertuples(index=False)
 
@@ -114,8 +120,10 @@ ComputedLibraries = namedtuple('ComputedLibraries', ['df_common', 'only_beets', 
 
 class Libraries():
     ddb: DimensionsDB
+    items: library.Library
+    xml_path = Path
     
-    def __init__(self, lib, query, xml_path=None):
+    def __init__(self, lib: library.Library, query, xml_path: Path = None):
         self.ddb = DimensionsDB()
         self.items = lib.items(query)
         self.xml_path = xml_path
@@ -169,21 +177,13 @@ class Libraries():
         index = df['Location'].str.normalize('NFD').str.lower()
         return df.set_index(index)
 
-    def to_pickle(self, dir):
+    def to_pickle(self, dir: Path) -> None:
         self.df_beets.to_pickle(dir / Path('df_beets.pkl'))
         self.ddb.to_pickle(dir)
         if self.df_rbxml is not None:
             self.df_rbxml.to_pickle(dir / Path('df_rbxml.pkl'))
-        
-        # TODO
-        # if self.df_common is not None:
-        #     self.df_common.to_pickle(dir / Path('df_common.pkl'))
-        # if self.only_beets is not None:
-        #     pandas.Series(self.only_beets).to_pickle(dir / Path('only_beets.pkl'))
-        # if self.only_rbxml is not None:
-        #     pandas.Series(self.only_rbxml).to_pickle(dir / Path('only_rbxml.pkl'))
 
-    def crop(self, music_directory=None):
+    def crop(self, music_directory: str = None) -> ComputedLibraries:
         df_r = self.df_rbxml
         if self.df_rbxml is not None and music_directory:
             # Filter tracks outside of music directory
@@ -200,7 +200,7 @@ class Libraries():
 
         return ComputedLibraries(df_common=df_common, only_beets=only_beets, only_rbxml=only_rbxml)
 
-    def get_export_df(self, index=None):
+    def get_export_df(self, index: pandas.Index | None = None) -> pandas.DataFrame:
         df_beets = self.df_beets if index is None else self.df_beets[index]
 
         drop, export_tuples = self.ddb.get_export_conversion_info()
@@ -221,7 +221,7 @@ class Libraries():
 
         return df
 
-    def get_sync_changed(self, df_common):
+    def get_sync_changed(self, df_common: pandas.DataFrame) -> pandas.DataFrame:
         def ne(l, r):
             return l.fillna(l.dtype.type()) != r
 
@@ -243,7 +243,7 @@ class Libraries():
         }) 
 
 
-def export_df(xml_path, df):
+def export_df(xml_path, df: pandas.DataFrame) -> None:
     outxml = pxml.RekordboxXml(
         name='rekordbox', version='5.4.3', company='Pioneer DJ'
     )
@@ -269,16 +269,19 @@ def export_df(xml_path, df):
 
 
 class RkBeetsPlugin(plugins.BeetsPlugin):
-    # Flexible attribute typing
-    item_types = {
-        'rkb_Rating': types.INTEGER,
-        'rkb_TrackID': types.INTEGER,
+    # beets plugin interface to declare flexible attr types
+    item_types: dict[str, types.Type] = {
+        'rkb_AverageBpm': types.FLOAT,
+        'rkb_Colour': types.STRING,
         'rkb_DateAdded': types.STRING,
-        'rkb_PlayCount': types.INTEGER,
+        'rkb_DateModified': types.STRING,
+        'rkb_LastPlayed': types.STRING,
         'rkb_Mix': types.STRING,
+        'rkb_PlayCount': types.INTEGER,
+        'rkb_Rating': types.INTEGER,
+        'rkb_Tonality': types.STRING,
+        'rkb_TrackID': types.INTEGER,
     }
-
-    libs: Libraries = None
 
     def __init__(self):
         super().__init__()
@@ -288,16 +291,7 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             'rekordbox_file': None,
         })
 
-    def check_export_file(self):
-        if not self.config['export_file']:
-            raise ui.UserError('export_file required')
-
-        xml_path = Path(self.config['export_file'].get()).resolve()
-        if xml_path.is_dir():
-            raise ui.UserError("xml_outdir is a directory: {}".format(xml_path))
-        return xml_path
-
-    def commands(self):
+    def commands(self) -> list[Callable[[library.Library, Any, Any], Any]]:
         rkb_export_cmd = ui.Subcommand(
             'rkb-export',
             help="export beets library for import into rekordbox"
@@ -318,18 +312,18 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             help="only consider files not already in rekordbox library"
         )
 
-        def rkb_export_func(lib, opts, args):
+        def rkb_export_func(lib: library.Library, opts, args):
             self.config.set_args(opts)
-            export_path = self.check_export_file()
+            export_path = self.config['export_file'].get()
 
-            self.libs = Libraries(
+            libs = Libraries(
                 lib, query=ui.decargs(args),
                 xml_path = self.config['rekordbox_file'].get()
             )
 
             index = None
             if opts.missing:
-                cl = self.libs.crop(config['directory'].get())
+                cl = libs.crop(config['directory'].get())
 
                 if cl.only_beets.empty:
                     print("nothing to do: no tracks are missing from rekordbox")
@@ -337,7 +331,7 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
 
                 index = cl.only_beets
 
-            df_export = self.libs.get_export_df(index)
+            df_export = libs.get_export_df(index)
 
             export_df(export_path, df_export)
 
@@ -358,23 +352,23 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             help="export dataframes to given directory"
         )
 
-        def rkb_diff_func(lib, opts, args):
+        def rkb_diff_func(lib: library.Library, opts, args):
             self.config.set_args(opts)
 
-            self.libs = Libraries(
+            libs = Libraries(
                 lib, query=ui.decargs(args),
                 xml_path = self.config['rekordbox_file'].get()
             )
 
-            cl = self.libs.crop(config['directory'].get())
-
             if opts.pickle:
                 print("Writing dataframes to {}".format(opts.pickle))
-                self.libs.to_pickle(opts.pickle)
+                libs.to_pickle(opts.pickle)
+
+            cl = libs.crop(config['directory'].get())
 
             print("{:>6d} tracks in rekordbox library (in beets directory)".format(
                 cl.df_common.index.size + cl.only_rbxml.size))
-            print("{:>6d} tracks in beets library".format(self.libs.df_beets.index.size))
+            print("{:>6d} tracks in beets library".format(libs.df_beets.index.size))
             print("{:>6d} shared tracks in both".format(cl.df_common.index.size))
 
             if not cl.only_rbxml.empty:
@@ -401,17 +395,17 @@ class RkBeetsPlugin(plugins.BeetsPlugin):
             help="print the changes instead of committing them"
         )
 
-        def rkb_sync_func(lib, opts, args):
+        def rkb_sync_func(lib: library.Library, opts, args):
             self.config.set_args(opts)
 
-            self.libs = Libraries(
+            libs = Libraries(
                 lib, query=ui.decargs(args),
                 xml_path = self.config['rekordbox_file'].get()
             )
 
-            cl = self.libs.crop(config['directory'].get())
+            cl = libs.crop(config['directory'].get())
 
-            df_sync_changed = self.libs.get_sync_changed(cl.df_common)
+            df_sync_changed = libs.get_sync_changed(cl.df_common)
 
             if df_sync_changed.empty:
                 print("nothing to update")
