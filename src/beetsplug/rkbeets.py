@@ -35,7 +35,7 @@ from typing import Any, Callable, Final, Iterable, TextIO, Tuple
 
 from beets import config
 from beets import plugins
-from beets.dbcore import types
+from beets.dbcore import db, types
 from beets import ui
 from beets import library
 import pandas
@@ -120,10 +120,13 @@ ComputedLibraries = namedtuple('ComputedLibraries', ['df_common', 'only_beets', 
 
 class Libraries():
     ddb: DimensionsDB
-    items: library.Library
+    items: db.Results
     xml_path = Path
     
-    def __init__(self, lib: library.Library, query, xml_path: Path = None):
+    def __init__(
+        self, lib: library.Library, query: str | list | tuple,
+        xml_path: Path = None
+    ):
         self.ddb = DimensionsDB()
         self.items = lib.items(query)
         self.xml_path = xml_path
@@ -183,9 +186,9 @@ class Libraries():
         if self.df_rbxml is not None:
             self.df_rbxml.to_pickle(dir / Path('df_rbxml.pkl'))
 
-    def crop(self, music_directory: str = None) -> ComputedLibraries:
+    def crop(self, music_directory: str | None = None) -> ComputedLibraries:
         df_r = self.df_rbxml
-        if self.df_rbxml is not None and music_directory:
+        if music_directory:
             # Filter tracks outside of music directory
             i = self.df_rbxml.index.str.startswith(music_directory.lower())
             df_r = self.df_rbxml[i]
