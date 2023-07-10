@@ -42,8 +42,7 @@ import pandas
 from tqdm import tqdm
 
 import beetsplug
-
-VERSION = '0.1.0'
+import beetsplug.rkbeets
 
 # pyrekordbox is chatty about missing/broken rekordbox configuration files
 previous_level = logging.root.manager.disable
@@ -68,7 +67,7 @@ class DimensionsDB():
 
     def __init__(self, csv_path: Path | None = None):
         path = csv_path if csv_path is not None else resources.path(
-            beetsplug, 'rkbeets-fields.csv')
+            beetsplug.rkbeets, 'rkbeets-fields.csv')
         self._df = pandas.read_csv(path)
         if self._df.index.has_duplicates:
             # TODO test this works
@@ -348,7 +347,7 @@ class Libraries():
             The tracks indexed by paths including all field columns with
             converted values ready for pyrekordbox xml api.
         """
-        df_beets = self._df_beets if index is None else self._df_beets[index]
+        df_beets = self._df_beets if index is None else self._df_beets.loc[index]
 
         export_info = self._ddb.get_export_conversion_info()
         df = df_beets.drop(columns=export_info.drop_fields)

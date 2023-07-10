@@ -1,1 +1,2 @@
-include src/beetsplug/*.csv
+include beetsplug/rkbeets/rkbeets-fields.csv
+

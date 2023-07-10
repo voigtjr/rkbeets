@@ -23,7 +23,7 @@ Remixer,string,remixer,string,,,
 SampleRate,float64,samplerate,int32,,,
 Size,int64,filesize,int64,,,
 Tonality,string,rkb_Tonality,string,,,true
-TotalTime,float64,length,int32,,,
+TotalTime,float64,length,float64,,,
 TrackID,int64,rkb_TrackID,Int64,true,,true
 TrackNumber,int32,track,int32,,,
 Year,int32,year,int32,,,

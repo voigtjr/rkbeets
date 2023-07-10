@@ -1,7 +1,16 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
 
-[tool.pytest.ini_options]
-addopts = [
-    "--import-mode=importlib",
+[project]
+name = "rkbeets"
+version = "0.1.0"
+dependencies = [
+    "beets>=1.6.0",
+    "pandas",
+    "pyrekordbox@git+https://github.com/voigtjr/pyrekordbox@master",
+    "tqdm",
 ]
+
+[tool.setuptools.package-data]
+beetsplug = ["*.csv"]
