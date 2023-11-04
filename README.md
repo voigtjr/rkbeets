@@ -38,7 +38,6 @@ beet rkb-export artist:radiohead --missing
 
 ### Inspect beets and rekordbox differences with `rkb-diff`
 
-
 Inspect how many tracks are shareed between the two libraries (and a list of those that aren't) with `rkb-diff`:
 
 ```sh
@@ -80,7 +79,7 @@ Currently implemented for these rekordbox fields:
 
 Import files using `beets import`.
 
-# Installation
+## Installation
 
 Since it is under development, use source:
 
@@ -90,6 +89,6 @@ Since it is under development, use source:
 * `pip install -e ../rkbeets`
 * `beet rkb-diff` and friends should work
 
-# License
+## License
 
 See [LICENSE](LICENSE).
